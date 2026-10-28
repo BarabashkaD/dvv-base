@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+# The version, with the release-stage label of a pre-release build (applications show it, e.g.
+# in --version).
+set(dvv_base_VERSION_STRING "@dvv_base_VERSION_STRING@")
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+find_dependency(nlohmann_json 3.12)
+
+include("${CMAKE_CURRENT_LIST_DIR}/dvv_baseTargets.cmake")
+# Shared CMake modules: include("${DVV_CMAKE_DIR}/DvvCompilerOptions.cmake").
+set(DVV_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
+check_required_components(dvv_base)

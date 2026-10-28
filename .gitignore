@@ -1,0 +1,10 @@
+# Build output lives in the dvv root, the folder holding dvv-build (<root>/_build,
+# <root>/_third_party), outside this repository; these guard against in-tree builds and
+# editor files.
+/build/
+/out/
+/.vs/
+/.vscode/
+/.idea/
+CMakeUserPresets.json
+*.user

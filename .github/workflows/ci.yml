@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per branch or pull request at a time. Only pull-request runs are cancelled by a newer
+# push, so a run on main can always reach its third-party cache save.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dvv:
+    uses: BarabashkaD/dvv-build/.github/workflows/dvv-ci.yml@v0.1.0
+    with:
+      repo: dvv-base
