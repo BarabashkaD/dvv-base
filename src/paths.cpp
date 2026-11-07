@@ -1,5 +1,7 @@
 #include "dvv/base/paths.h"
 
+#include <climits>
+#include <cstdint>
 #include <format>
 #include <string>
 #include <system_error>
@@ -16,6 +18,8 @@
 // clang-format on
 #elif defined(__linux__)
 #include <unistd.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 namespace dvv::paths {
@@ -42,6 +46,15 @@ Result<std::filesystem::path> knownFolder(const KNOWNFOLDERID& id) {
     CoTaskMemFree(raw);
     return folder;
 }
+#elif defined(__APPLE__)
+// $HOME/<relative>; XDG variables are not used on macOS.
+Result<std::filesystem::path> homeDir(std::string_view relative) {
+    const auto home = getEnvironment("HOME");
+    if (!home || home->empty()) {
+        return makeError(Errc::Io, "HOME is not set");
+    }
+    return std::filesystem::path(*home) / relative;
+}
 #else
 // $variable when it holds an absolute path, otherwise $HOME/<fallback>.
 Result<std::filesystem::path> xdgDir(std::string_view variable, std::string_view fallback) {
@@ -65,6 +78,8 @@ Result<std::filesystem::path> userDataDir(std::string_view app) {
     DVV_TRY_VOID(checkApp(app));
 #if defined(_WIN32)
     DVV_TRY(auto base, knownFolder(FOLDERID_RoamingAppData));
+#elif defined(__APPLE__)
+    DVV_TRY(auto base, homeDir("Library/Application Support"));
 #else
     DVV_TRY(auto base, xdgDir("XDG_DATA_HOME", ".local/share"));
 #endif
@@ -76,6 +91,9 @@ Result<std::filesystem::path> userCacheDir(std::string_view app) {
 #if defined(_WIN32)
     DVV_TRY(auto base, knownFolder(FOLDERID_LocalAppData));
     return base / app / "cache";
+#elif defined(__APPLE__)
+    DVV_TRY(auto base, homeDir("Library/Caches"));
+    return base / app;
 #else
     DVV_TRY(auto base, xdgDir("XDG_CACHE_HOME", ".cache"));
     return base / app;
@@ -101,6 +119,23 @@ Result<std::filesystem::path> executablePath() {
     auto path = std::filesystem::read_symlink("/proc/self/exe", error);
     if (error) {
         return makeError(Errc::Io, std::format("cannot read /proc/self/exe: {}", error.message()));
+    }
+    return path;
+#elif defined(__APPLE__)
+    std::vector<char> buffer(PATH_MAX);
+    auto size = static_cast<uint32_t>(buffer.size());
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        // Too small: `size` now holds the required length.
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+            return makeError(Errc::Io, "_NSGetExecutablePath failed");
+        }
+    }
+    std::error_code error;
+    auto path = std::filesystem::canonical(buffer.data(), error);
+    if (error) {
+        return makeError(Errc::Io,
+                         std::format("cannot resolve the executable path: {}", error.message()));
     }
     return path;
 #else

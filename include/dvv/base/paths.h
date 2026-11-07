@@ -5,6 +5,8 @@
 //   Windows: data = FOLDERID_RoamingAppData\<app>, cache = FOLDERID_LocalAppData\<app>\cache
 //   Linux:   data = $XDG_DATA_HOME/<app> or ~/.local/share/<app>,
 //            cache = $XDG_CACHE_HOME/<app> or ~/.cache/<app>
+//   macOS:   data = ~/Library/Application Support/<app>, cache = ~/Library/Caches/<app>
+//            (XDG variables are ignored)
 
 #include <filesystem>
 #include <string_view>

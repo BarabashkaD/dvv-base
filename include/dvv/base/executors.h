@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <deque>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <source_location>
@@ -13,6 +12,7 @@
 #include "dvv/base/error.h"
 #include "dvv/base/executor.h"
 #include "dvv/base/lifetime.h"
+#include "dvv/base/move_only_function.h"
 
 namespace dvv {
 
@@ -30,7 +30,7 @@ public:
     ThreadPool(CreationKey<ExecutorFactory> key, std::size_t thread_count);
     ~ThreadPool() override;
 
-    void post(std::move_only_function<void()> work) override;
+    void post(MoveOnlyFunction<void()> work) override;
     [[nodiscard]] std::size_t threadCount() const noexcept { return threads_.size(); }
 
 private:
@@ -56,14 +56,14 @@ class SerialExecutor final : public IExecutor,
 public:
     SerialExecutor(CreationKey<ExecutorFactory> key, std::shared_ptr<IExecutor> target) noexcept;
 
-    void post(std::move_only_function<void()> work) override;
+    void post(MoveOnlyFunction<void()> work) override;
 
 private:
     void drain();
 
     std::shared_ptr<IExecutor> target_;  // strong reference up to the parent executor
     std::mutex mutex_;
-    std::deque<std::move_only_function<void()>> queue_;
+    std::deque<MoveOnlyFunction<void()>> queue_;
     bool scheduled_ = false;
 };
 
