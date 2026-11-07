@@ -6,6 +6,20 @@ the dvv rules: compatible = the same major and at least the minimum version, als
 changes only in a new major, after a deprecation. This file is the release notes (there are no
 GitHub Releases).
 
+## [0.2.0] - 2026-11-07
+
+macOS on Apple Silicon.
+
+### Added
+- `dvv::MoveOnlyFunction`: `std::move_only_function` where the standard library has it, an own
+  implementation elsewhere (e.g. Apple libc++).
+- macOS per-user paths (`~/Library/Application Support`, `~/Library/Caches`) and
+  `executablePath()` on macOS.
+
+### Changed
+- The executor types take `dvv::MoveOnlyFunction`; source-compatible where
+  `std::move_only_function` exists.
+
 ## [0.1.0] - 2026-10-28
 
 First versioned release.

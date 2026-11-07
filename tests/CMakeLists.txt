@@ -7,6 +7,7 @@ add_executable(dvv_base_tests
     test_executors.cpp
     test_json.cpp
     test_lifetime.cpp
+    test_move_only_function.cpp
     test_log.cpp
     test_paths.cpp
     test_task.cpp

@@ -12,12 +12,12 @@ namespace dvv {
 struct ThreadPool::State {
     std::mutex mutex;
     std::condition_variable_any wake;
-    std::deque<std::move_only_function<void()>> queue;
+    std::deque<MoveOnlyFunction<void()>> queue;
 };
 
 void ThreadPool::runWorker(State& state, const std::stop_token& stop) {
     for (;;) {
-        std::move_only_function<void()> work;
+        MoveOnlyFunction<void()> work;
         {
             std::unique_lock lock(state.mutex);
             state.wake.wait(lock, stop, [&state] { return !state.queue.empty(); });
@@ -53,7 +53,7 @@ ThreadPool::~ThreadPool() {
     }
 }
 
-void ThreadPool::post(std::move_only_function<void()> work) {
+void ThreadPool::post(MoveOnlyFunction<void()> work) {
     {
         std::lock_guard lock(state_->mutex);
         state_->queue.push_back(std::move(work));
@@ -65,7 +65,7 @@ SerialExecutor::SerialExecutor(CreationKey<ExecutorFactory> key,
                                std::shared_ptr<IExecutor> target) noexcept
     : Managed(std::move(key)), target_(std::move(target)) {}
 
-void SerialExecutor::post(std::move_only_function<void()> work) {
+void SerialExecutor::post(MoveOnlyFunction<void()> work) {
     bool schedule = false;
     std::size_t index = 0;
     {
@@ -89,7 +89,7 @@ void SerialExecutor::post(std::move_only_function<void()> work) {
             // move_only_function is noexcept); taking the lock could throw std::system_error
             // (practically unreachable). The removed item is destroyed only after the lock is
             // released, because its captures' destructors may post to this executor again.
-            std::move_only_function<void()> removed;
+            MoveOnlyFunction<void()> removed;
             {
                 std::lock_guard lock(mutex_);
                 const auto slot = queue_.begin() + static_cast<std::ptrdiff_t>(index);
@@ -104,7 +104,7 @@ void SerialExecutor::post(std::move_only_function<void()> work) {
 
 void SerialExecutor::drain() {
     for (;;) {
-        std::move_only_function<void()> work;
+        MoveOnlyFunction<void()> work;
         {
             std::lock_guard lock(mutex_);
             if (queue_.empty()) {

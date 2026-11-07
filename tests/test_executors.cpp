@@ -50,9 +50,9 @@ public:
     void setFailing(bool failing) { failing_.store(failing); }
 
     // Runs once, right before the next failing post throws (set it while no post is running).
-    void beforeNextThrow(std::move_only_function<void()> hook) { before_throw_ = std::move(hook); }
+    void beforeNextThrow(dvv::MoveOnlyFunction<void()> hook) { before_throw_ = std::move(hook); }
 
-    void post(std::move_only_function<void()> work) override {
+    void post(dvv::MoveOnlyFunction<void()> work) override {
         if (failing_.load()) {
             if (auto hook = std::exchange(before_throw_, {})) {
                 hook();
@@ -65,7 +65,7 @@ public:
 private:
     std::shared_ptr<dvv::IExecutor> real_;
     std::atomic<bool> failing_{false};
-    std::move_only_function<void()> before_throw_;
+    dvv::MoveOnlyFunction<void()> before_throw_;
 };
 
 // Work item whose destructor posts one counting item to an executor; a moved-from one posts

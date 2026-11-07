@@ -1,6 +1,6 @@
 #pragma once
 
-#include <functional>
+#include "dvv/base/move_only_function.h"
 
 namespace dvv {
 
@@ -11,7 +11,7 @@ public:
 
     // Queues work. The work must not throw. If post throws, the work was not queued and will never
     // run.
-    virtual void post(std::move_only_function<void()> work) = 0;
+    virtual void post(MoveOnlyFunction<void()> work) = 0;
 };
 
 }  // namespace dvv
