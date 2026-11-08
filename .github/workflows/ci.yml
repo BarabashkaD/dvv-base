@@ -17,6 +17,6 @@ concurrency:
 
 jobs:
   dvv:
-    uses: BarabashkaD/dvv-build/.github/workflows/dvv-ci.yml@v0.3.1
+    uses: BarabashkaD/dvv-build/.github/workflows/dvv-ci.yml@v0.3.2
     with:
       repo: dvv-base
