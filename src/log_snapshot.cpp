@@ -231,9 +231,10 @@ std::uint32_t writeRecords(const detail::LogRing& ring, LogSnapshotBuffer& buffe
         // While the log thread has neither zeroed nor released the record, no writer can reuse its
         // bytes, so the copy is whole.
         if (!ring.unchanged(*record)) {
-            // Handled and zeroed or given back meanwhile; the copy may be torn. Go on from the
-            // release.
-            position = std::max(ring.releasePosition(), record->next);
+            // Handled and zeroed or given back meanwhile; the copy may be torn, and so may the
+            // header `next` came from. Go on from the release, or read this record's own start
+            // again: its zeroed commit word ends the walk unless the release has moved by then.
+            position = std::max(ring.releasePosition(), record->position);
             continue;
         }
         position = record->next;
