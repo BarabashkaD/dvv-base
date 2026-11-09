@@ -1,6 +1,9 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -9,9 +12,12 @@
 #include <random>
 #include <string>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 #include "dvv/base/leak_check.h"
 #include "dvv/base/log.h"
+#include "log_test_support.h"
 
 namespace {
 
@@ -342,4 +348,163 @@ TEST_CASE("reopening an existing log appends and accounts its size") {
     CHECK(firstLineNumber(old_text) == 1);
     CHECK(lastLineNumber(old_text) == 2);
     CHECK(firstLineNumber(readFile(path)) == 3);
+}
+
+namespace {
+
+// Keeps the records with their lines, to compare a line with formatLogRecord.
+class RecordSink final : public dvv::ILogSink {
+public:
+    struct Entry {
+        dvv::LogRecord record;
+        std::string message;
+        std::string line;
+    };
+
+    void write(const dvv::LogRecord& record, std::string_view line) override {
+        entries.push_back({record, std::string(record.message), std::string(line)});
+        entries.back().record.message = entries.back().message;
+    }
+
+    std::deque<Entry> entries;  // a deque keeps the message views valid
+};
+
+bool contains(const std::vector<std::string>& lines, std::string_view part) {
+    return std::ranges::any_of(
+        lines, [&](const std::string& line) { return line.find(part) != std::string::npos; });
+}
+
+}  // namespace
+
+TEST_CASE("sync: a disabled level does not evaluate its arguments") {
+    LoggerScope scope;
+    auto sink = std::make_shared<dvv::MemorySink>();
+    dvv::Logger::instance().addSink(sink, dvv::LogLevel::Info);
+    int evaluated = 0;
+    DVV_LOG_DEBUG("n {}", ++evaluated);
+    CHECK(evaluated == 0);
+    DVV_LOG_INFO("n {}", ++evaluated);
+    CHECK(evaluated == 1);
+}
+
+TEST_CASE("sync: the gate is closed without sinks and follows sink levels") {
+    LoggerScope scope;
+    auto& logger = dvv::Logger::instance();
+    logger.setLevel(dvv::LogLevel::Trace);
+    CHECK_FALSE(logger.enabled(dvv::LogLevel::Error));  // no sinks
+    auto sink = std::make_shared<dvv::MemorySink>();
+    logger.addSink(sink, dvv::LogLevel::Warn);
+    CHECK_FALSE(logger.enabled(dvv::LogLevel::Info));
+    CHECK(logger.enabled(dvv::LogLevel::Warn));
+    logger.setSinkLevel(*sink, dvv::LogLevel::Debug);
+    CHECK(logger.enabled(dvv::LogLevel::Debug));
+    CHECK(logger.level() == dvv::LogLevel::Trace);  // sink changes leave level() alone
+    CHECK_FALSE(logger.enabled(dvv::LogLevel::Off));
+}
+
+TEST_CASE("sync: per-sink levels") {
+    LoggerScope scope;
+    auto& logger = dvv::Logger::instance();
+    logger.setLevel(dvv::LogLevel::Trace);
+    auto all = std::make_shared<dvv::MemorySink>();
+    auto warnings = std::make_shared<dvv::MemorySink>();
+    logger.addSink(all, dvv::LogLevel::Trace);
+    logger.addSink(warnings, dvv::LogLevel::Warn);
+    DVV_LOG_INFO("info {}", 1);
+    DVV_LOG_WARN("warn {}", 2);
+    CHECK(all->lines().size() == 2);
+    REQUIRE(warnings->lines().size() == 1);
+    CHECK(warnings->lines()[0].find("warn 2") != std::string::npos);
+}
+
+TEST_CASE("sync: a message is in the sink before the call returns") {
+    LoggerScope scope;
+    auto sink = std::make_shared<dvv::MemorySink>();
+    dvv::Logger::instance().addSink(sink);
+    constexpr int THREADS = 8;
+    std::atomic<int> missing{0};
+    std::vector<std::thread> threads;
+    threads.reserve(THREADS);
+    for (int id = 0; id < THREADS; ++id) {
+        threads.emplace_back([&sink, &missing, id] {
+            DVV_LOG_INFO("thread {} hello", id);
+            if (!contains(sink->lines(), std::format("thread {} hello", id))) {
+                ++missing;
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    CHECK(missing == 0);
+    CHECK(sink->lines().size() == THREADS);
+}
+
+TEST_CASE("sync: deferred, caller-formatted and text messages print as std::format") {
+    LoggerScope scope;
+    auto sink = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(sink);
+    DVV_LOG_INFO("{} {:>4}", 7, "ab");
+    DVV_LOG_INFO("colour {}", dvv_test::Colour::Red);
+    DVV_LOG_INFO("none");
+    DVV_LOG_TEXT(dvv::LogLevel::Warn, "plain");
+    REQUIRE(sink->entries.size() == 4);
+    CHECK(sink->entries[0].message == "7   ab");
+    CHECK(sink->entries[1].message == "colour red");
+    CHECK(sink->entries[2].message == "none");
+    CHECK(sink->entries[3].message == "plain");
+    CHECK(sink->entries[3].record.level == dvv::LogLevel::Warn);
+    for (const auto& entry : sink->entries) {
+        CHECK(entry.line == dvv::formatLogRecord(entry.record));
+    }
+}
+
+TEST_CASE("sync: bare {} warns once per call site, DVV_LOG_TEXT never") {
+    LoggerScope scope;
+    auto sink = std::make_shared<dvv::MemorySink>();
+    dvv::Logger::instance().addSink(sink);
+    const std::string text = "some text";
+    for (int i = 0; i < 3; ++i) {
+        DVV_LOG_INFO("{}", text);
+    }
+    auto lines = sink->lines();
+    CHECK(std::ranges::count_if(lines, [](const std::string& line) {
+              return line.find("some text") != std::string::npos;
+          }) == 3);
+    CHECK(std::ranges::count_if(lines, [](const std::string& line) {
+              return line.find("formats only \"{}\"") != std::string::npos &&
+                     line.find("test_log.cpp") != std::string::npos &&
+                     line.find("WARN") != std::string::npos;
+          }) == 1);
+    const auto before = lines.size();
+    DVV_LOG_TEXT(dvv::LogLevel::Info, "{}");
+    DVV_LOG_TEXT(dvv::LogLevel::Info, "{}");
+    lines = sink->lines();
+    CHECK(lines.size() == before + 2);
+    CHECK_FALSE(lines.back().find("formats only") != std::string::npos);
+}
+
+TEST_CASE("sync: Logger::write keeps its run-time location") {
+    LoggerScope scope;
+    auto sink = std::make_shared<dvv::MemorySink>();
+    dvv::Logger::instance().addSink(sink);
+    const auto where = std::source_location::current();
+    dvv::Logger::instance().write(dvv::LogLevel::Info, "x", where);
+    REQUIRE(sink->lines().size() == 1);
+    const std::string expected = std::format("[test_log.cpp:{}]", where.line());
+    CHECK(sink->lines()[0].ends_with(expected));
+}
+
+TEST_CASE("system log sink accepts every level and a message with % signs") {
+    LoggerScope scope;
+    dvv::Logger::instance().setLevel(dvv::LogLevel::Trace);
+    dvv::Logger::instance().addSink(std::make_shared<dvv::SystemLogSink>("dvv-base-test"));
+    DVV_LOG_TRACE("trace {}", 1);
+    DVV_LOG_DEBUG("debug {}", 2);
+    DVV_LOG_INFO("info {}", 3);
+    DVV_LOG_WARN("warn {}", 4);
+    DVV_LOG_ERROR("error {}", 5);
+    DVV_LOG_INFO("100% {}", "%s %n %d");
+    dvv::Logger::instance().clearSinks();
+    CHECK(true);
 }
