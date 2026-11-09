@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.2)
-project(dvv_base VERSION 0.2.0 DESCRIPTION "dvv base library" LANGUAGES CXX)
+project(dvv_base VERSION 0.3.0 DESCRIPTION "dvv base library" LANGUAGES CXX)
 # Version string; a pre-release build adds its release-stage label (user decision U-M4ORDER).
 set(dvv_base_VERSION_STRING "${PROJECT_VERSION}")
 
@@ -35,7 +35,10 @@ add_library(dvv_base STATIC
     src/leak_check.cpp
     src/lifetime.cpp
     src/log.cpp
+    src/log_ring.cpp
+    src/log_snapshot.cpp
     src/paths.cpp
+    src/system_log_sink.cpp
     src/uri.cpp)
 add_library(dvv::base ALIAS dvv_base)
 set_target_properties(dvv_base PROPERTIES EXPORT_NAME base)

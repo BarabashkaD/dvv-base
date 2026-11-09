@@ -39,7 +39,7 @@ std::string formatLeakReport(std::span<const LiveObjectInfo> leaks) {
 }
 
 int finishWithLeakCheck(int exit_code, LeakPolicy policy) {
-    Logger::instance().flush();
+    Logger::instance().stop();
     const auto leaks = LifetimeRegistry::instance().liveObjects();
     if (leaks.empty()) {
         return exit_code;

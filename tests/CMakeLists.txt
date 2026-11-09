@@ -9,11 +9,17 @@ add_executable(dvv_base_tests
     test_lifetime.cpp
     test_move_only_function.cpp
     test_log.cpp
+    test_log_async.cpp
+    test_log_encode.cpp
+    test_log_ring.cpp
+    test_log_snapshot.cpp
     test_paths.cpp
     test_task.cpp
     test_uri.cpp
     test_when_all.cpp)
 target_link_libraries(dvv_base_tests PRIVATE dvv::base doctest::doctest)
+# The private log ring header is tested directly.
+target_include_directories(dvv_base_tests PRIVATE ${dvv_base_SOURCE_DIR}/src)
 # doctest otherwise only forward-declares std::ostream, which breaks printing std types.
 target_compile_definitions(dvv_base_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 dvv_set_compiler_options(dvv_base_tests)
@@ -86,3 +92,38 @@ foreach(case IN ITEMS 1 2 3)
     # dependent build with DVV_TEST_DEPENDENCIES, so they share one lock name.
     set_tests_properties(dvv_base.compile_fail.${case} PROPERTIES RESOURCE_LOCK dvv_build_tree)
 endforeach()
+
+# Compile-fail tests of the log call sites: the format string is checked at compile time. Case 0 is
+# the control and must build; cases 1 and 2 must fail with the expected diagnostic.
+set(log_format_source ${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/log_format.cpp)
+add_executable(dvv_base_log_format_ok ${log_format_source})
+target_compile_definitions(dvv_base_log_format_ok PRIVATE DVV_COMPILE_FAIL_CASE=0)
+target_link_libraries(dvv_base_log_format_ok PRIVATE dvv::base)
+dvv_set_compiler_options(dvv_base_log_format_ok)
+if(MSVC)
+    set(log_format_pattern "C7595")
+else()
+    set(log_format_pattern "constant expression")
+endif()
+foreach(case IN ITEMS 1 2)
+    set(target dvv_base_log_format_fail_${case})
+    add_executable(${target} EXCLUDE_FROM_ALL ${log_format_source})
+    target_compile_definitions(${target} PRIVATE DVV_COMPILE_FAIL_CASE=${case})
+    target_link_libraries(${target} PRIVATE dvv::base)
+    dvv_set_compiler_options(${target})
+    add_test(NAME dvv_base.compile_fail.log_format.${case}
+             COMMAND ${CMAKE_COMMAND}
+                     -DBUILD_DIR=${CMAKE_BINARY_DIR}
+                     -DCONFIG=$<CONFIG>
+                     -DTARGET=${target}
+                     "-DPATTERN=${log_format_pattern}"
+                     -P ${DVV_CMAKE_DIR}/run-compile-fail.cmake)
+    set_tests_properties(dvv_base.compile_fail.log_format.${case} PROPERTIES
+        RESOURCE_LOCK dvv_build_tree)
+endforeach()
+
+# Cost of a log call (spec §5.1); built on demand, in a Release configuration:
+# cmake --build --preset ninja-macos-release --target dvv_base_log_bench
+add_executable(dvv_base_log_bench EXCLUDE_FROM_ALL bench/log_bench.cpp)
+target_link_libraries(dvv_base_log_bench PRIVATE dvv::base)
+dvv_set_compiler_options(dvv_base_log_bench)

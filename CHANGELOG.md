@@ -6,6 +6,30 @@ the dvv rules: compatible = the same major and at least the minimum version, als
 changes only in a new major, after a deprecation. This file is the release notes (there are no
 GitHub Releases).
 
+## [0.3.0] - 2026-11-09
+
+### Added
+- Asynchronous logging: `Logger::start()` starts the log thread; a call queues its message in a
+  4 MiB ring and the sinks run on the log thread. `stop()` (always flushes) and `flush()`.
+- Sink levels: `addSink(sink, level)` and `setSinkLevel`.
+- `ILogSink::batchEnd()`, called after each pass of the log thread.
+- `DVV_LOG_TEXT` for messages that are plain text.
+- `SystemLogSink`: os_log on macOS, syslog on Linux, `OutputDebugStringW` on Windows.
+- Crash snapshot: `Logger::writeCrashSnapshot` (async-signal-safe), `crashSnapshotCapacity` and
+  `dvv::decodeCrashSnapshot`.
+- A benchmark target, `dvv_base_log_bench` (not built by default).
+
+### Changed
+- The log macros encode bool, char, integer, floating-point, string and pointer arguments and format
+  them later; other types are formatted on the calling thread.
+- In asynchronous mode the sinks run on the log thread; `addSink` and `clearSinks` are ignored
+  (with an Error line) while it runs.
+- Long string arguments are cut on a UTF-8 boundary and end with `…[cut]`. When the ring is full,
+  messages are dropped and counted.
+- `finishWithLeakCheck` stops the log thread.
+- A log call whose format is a bare `"{}"` warns once per call site.
+- The gate is closed without sinks: `enabled()` is false and calls do nothing.
+
 ## [0.2.0] - 2026-11-07
 
 macOS on Apple Silicon.
