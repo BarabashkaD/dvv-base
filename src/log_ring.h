@@ -21,18 +21,21 @@
 
 namespace dvv::detail {
 
-// A published record's commit word is its start position XOR this value, so a stale payload word
-// from an earlier lap matches only if it is that exact value at that exact offset.
+// A published record's commit word is its start position XOR this value. Positions are multiples of
+// 8 and the value is odd, so a commit word is never 0: the value release() leaves at every byte.
 inline constexpr std::uint64_t LOG_COMMIT_MIX = 0x9E3779B97F4A7C15ULL;
+static_assert(LOG_COMMIT_MIX % 8 != 0);
 
 // Positions count every byte ever reserved; a position's slot is `position % bytes()`. Each record
 // is 8-byte aligned and never wraps:
 //   offset 0   commit word (64-bit, accessed atomically): `position ^ LOG_COMMIT_MIX` once
-//              published, else whatever an earlier lap left there
+//              published, else 0 (release() zeroes the bytes it gives back)
 //   offset 8   payload size in bytes (32-bit)
 //   offset 12  kind (32-bit): a record or padding
 //   offset 16  payload, then up to 7 bytes to the next 8-byte boundary
 // A padding record at the ring's end with only 8 bytes left is just a commit word.
+// A record starts where the previous one ends, so until its writer commits, its commit word is the
+// 0 from the release: an earlier lap's bytes (logged text included) never pass for a record.
 class LogRing {
 public:
     struct Reservation {
@@ -69,8 +72,12 @@ public:
     // The published record at `position` or after the padding there; nullopt when that record is
     // not published yet. One reader at a time.
     [[nodiscard]] std::optional<Record> read(std::uint64_t position) const noexcept;
-    // Gives the bytes before `position` back to the writers (release ordering).
+    // Zeroes the bytes from the last release up to `position` (both record boundaries the reader
+    // reached), then gives them back to the writers (release ordering).
     void release(std::uint64_t position) noexcept;
+    // After copying out a record read() returned while the log thread may still run (the crash
+    // snapshot): true when the copy is whole, as release() has not zeroed or given back its bytes.
+    [[nodiscard]] bool unchanged(const Record& record) const noexcept;
     [[nodiscard]] std::uint64_t releasePosition() const noexcept;
     // The end of everything reserved so far, published or not.
     [[nodiscard]] std::uint64_t writePosition() const noexcept;
@@ -80,6 +87,8 @@ public:
 
 private:
     [[nodiscard]] std::uint64_t* wordAt(std::uint64_t position) const noexcept;
+    // The end of the record at `position`, which read() has accepted.
+    [[nodiscard]] std::uint64_t recordEnd(std::uint64_t position) const noexcept;
     void writeHeader(std::uint64_t position, std::uint32_t size, std::uint32_t kind) noexcept;
     void commit(std::uint64_t position) noexcept;
 

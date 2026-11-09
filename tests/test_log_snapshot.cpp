@@ -27,6 +27,20 @@
 #include <malloc.h>  // _aligned_malloc, _aligned_free
 #endif
 
+// ThreadSanitizer's runtime defines the global allocation functions itself, so replacements do
+// not link: under TSan the allocation-counting test and its replacements are left out.
+#if defined(__SANITIZE_THREAD__)
+#define DVV_TEST_COUNTS_ALLOCATIONS 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define DVV_TEST_COUNTS_ALLOCATIONS 0
+#endif
+#endif
+#if !defined(DVV_TEST_COUNTS_ALLOCATIONS)
+#define DVV_TEST_COUNTS_ALLOCATIONS 1
+#endif
+
+#if DVV_TEST_COUNTS_ALLOCATIONS
 // Replacement allocation functions for the whole test binary, so the snapshot test can count the
 // allocations of one call. Every form goes to malloc/free (aligned ones to the matching aligned
 // functions), so a pointer is always freed by the family that allocated it. They count only on a
@@ -151,6 +165,7 @@ void operator delete[](void* pointer, std::align_val_t /*alignment*/,
                        const std::nothrow_t& /*tag*/) noexcept {
     freeAligned(pointer);
 }
+#endif  // DVV_TEST_COUNTS_ALLOCATIONS
 
 namespace {
 
@@ -207,6 +222,7 @@ std::vector<std::byte> snapshot() {
     return out;
 }
 
+#if DVV_TEST_COUNTS_ALLOCATIONS
 // Copies into storage reserved beforehand: writing allocates nothing.
 struct FixedBuffer {
     std::byte* data;
@@ -224,6 +240,7 @@ void appendToFixed(void* context, const void* data, std::size_t size) {
     std::memcpy(out.data + out.size, data, size);
     out.size += size;
 }
+#endif  // DVV_TEST_COUNTS_ALLOCATIONS
 
 void logMixed() {
     DVV_LOG_INFO("numbers {:>6}|{:x}|{:.3f}", 42, 255U, 3.14159);
@@ -293,6 +310,7 @@ TEST_CASE("snapshot: an unpublished record ends the snapshot") {
     CHECK(sink->lines().size() == 3);
 }
 
+#if DVV_TEST_COUNTS_ALLOCATIONS
 TEST_CASE("snapshot: writing allocates nothing") {
     const AsyncScope scope;
     dvv::detail::resetCrashSnapshotForTest();
@@ -320,6 +338,7 @@ TEST_CASE("snapshot: writing allocates nothing") {
     CHECK_FALSE(buffer.overflow);
     CHECK(dvv::decodeCrashSnapshot(std::span(storage.data(), buffer.size)).size() == 5);
 }
+#endif  // DVV_TEST_COUNTS_ALLOCATIONS
 
 TEST_CASE("snapshot: a second call returns at once without writing") {
     const AsyncScope scope;

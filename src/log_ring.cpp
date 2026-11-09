@@ -1,5 +1,6 @@
 #include "log_ring.h"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -32,6 +33,7 @@ LogRing::LogRing(std::size_t bytes)
     : bytes_(checkedBytes(bytes)),
       mask_(bytes - 1),
       record_limit_(bytes / 16),
+      // Value-initialized: all zero, as release() leaves the bytes it gives back.
       words_(std::make_unique<std::uint64_t[]>(bytes / sizeof(std::uint64_t))) {}
 
 std::optional<LogRing::Reservation> LogRing::reserve(std::uint32_t payload_bytes,
@@ -87,9 +89,10 @@ std::optional<LogRing::Record> LogRing::read(std::uint64_t position) const noexc
         if (word != (position ^ LOG_COMMIT_MIX)) {
             return std::nullopt;
         }
-        // A stale payload word at or past the write position is never a commit word (R4). A real
-        // record passes: its reservation moved the write position before its commit, which the
-        // acquire load above makes visible.
+        // Defence in depth (release() zeroes what an earlier lap left, so no logged value is ever
+        // at a record start): nothing at or past the write position is a record. A real record
+        // passes: its reservation moved the write position before its commit, which the acquire
+        // load above makes visible.
         if (position >= write_.load(std::memory_order_acquire)) {
             return std::nullopt;
         }
@@ -105,9 +108,9 @@ std::optional<LogRing::Record> LogRing::read(std::uint64_t position) const noexc
         std::uint32_t kind = 0;
         std::memcpy(&size, header + 8, sizeof(size));
         std::memcpy(&kind, header + 12, sizeof(kind));
-        // A logged value can forge a commit word (R4), so the header is checked before it is
-        // trusted: a record within the limit, or padding within the limit or up to the ring's end,
-        // never crossing the end. Anything else counts as not published.
+        // Defence in depth too, the header is checked before it is trusted: a record within the
+        // limit, or padding within the limit or up to the ring's end, never crossing the end.
+        // Anything else counts as not published.
         const std::uint64_t total = alignUp(std::uint64_t{HEADER_BYTES} + size);
         const bool within_limit = total <= record_limit_;
         const bool valid_record = kind == KIND_RECORD && within_limit;
@@ -125,7 +128,35 @@ std::optional<LogRing::Record> LogRing::read(std::uint64_t position) const noexc
 }
 
 void LogRing::release(std::uint64_t position) noexcept {
+    // Only the reader stores the release position. No writer touches [from, position) until the
+    // store below, so plain writes zero it; the store's release ordering makes the zeros visible
+    // to a writer that acquires the new position before it reserves those bytes again.
+    const std::uint64_t from = release_.load(std::memory_order_relaxed);
+    // The commit words first, then the rest: a crash snapshot that copied a record and then still
+    // sees its commit word (unchanged(), after an acquire fence) copied no zeroed byte.
+    for (std::uint64_t at = from; at < position; at = recordEnd(at)) {
+        std::atomic_ref<std::uint64_t>(*wordAt(at)).store(0, std::memory_order_relaxed);
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    std::byte* ring = reinterpret_cast<std::byte*>(words_.get());
+    for (std::uint64_t at = from; at < position;) {
+        // Records never cross the ring's end, so each is one range; the commit word is done.
+        const std::uint64_t end = std::min(recordEnd(at), position);
+        std::memset(ring + (at & mask_) + sizeof(std::uint64_t), 0,
+                    end - at - sizeof(std::uint64_t));
+        at = end;
+    }
     release_.store(position, std::memory_order_release);
+}
+
+bool LogRing::unchanged(const Record& record) const noexcept {
+    // The copy's loads come before the loads below. release() zeroes the commit word before any
+    // other byte of the record and gives the bytes to writers only after that.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const std::uint64_t word =
+        std::atomic_ref<std::uint64_t>(*wordAt(record.position)).load(std::memory_order_relaxed);
+    return word == (record.position ^ LOG_COMMIT_MIX) &&
+           release_.load(std::memory_order_relaxed) <= record.position;
 }
 
 std::uint64_t LogRing::releasePosition() const noexcept {
@@ -143,6 +174,19 @@ const std::byte* LogRing::base() const noexcept {
 
 std::uint64_t* LogRing::wordAt(std::uint64_t position) const noexcept {
     return words_.get() + ((position & mask_) / sizeof(std::uint64_t));
+}
+
+std::uint64_t LogRing::recordEnd(std::uint64_t position) const noexcept {
+    const std::uint64_t offset = position & mask_;
+    const std::uint64_t tail = bytes_ - offset;
+    if (tail < HEADER_BYTES) {
+        return position + tail;
+    }
+    std::uint32_t size = 0;
+    std::memcpy(&size, base() + offset + 8, sizeof(size));
+    // read() accepted the header, so the record ends within the ring; the bound only keeps a
+    // damaged header from running past it.
+    return position + std::min(alignUp(std::uint64_t{HEADER_BYTES} + size), tail);
 }
 
 void LogRing::writeHeader(std::uint64_t position, std::uint32_t size, std::uint32_t kind) noexcept {
