@@ -228,13 +228,12 @@ std::uint32_t writeRecords(const detail::LogRing& ring, LogSnapshotBuffer& buffe
             break;
         }
         std::memcpy(buffer.record.data(), record->payload, record->size);
-        // The copy's loads come before the load of the release position: while the log thread
-        // has not passed the record, no writer can reuse its bytes, so the copy is whole.
-        std::atomic_thread_fence(std::memory_order_acquire);
-        const std::uint64_t released = ring.releasePosition();
-        if (released > record->position) {
-            // Handled and given back meanwhile; the copy may be torn. Go on from the release.
-            position = std::max(released, record->next);
+        // While the log thread has neither zeroed nor released the record, no writer can reuse its
+        // bytes, so the copy is whole.
+        if (!ring.unchanged(*record)) {
+            // Handled and zeroed or given back meanwhile; the copy may be torn. Go on from the
+            // release.
+            position = std::max(ring.releasePosition(), record->next);
             continue;
         }
         position = record->next;

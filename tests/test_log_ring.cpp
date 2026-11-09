@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -124,26 +125,26 @@ TEST_CASE("ring: an unpublished record stops the reader, then appears once publi
     CHECK(holds(three, 3, 24));
 }
 
-TEST_CASE("ring: stale bytes from earlier laps are never read as a record") {
+TEST_CASE("ring: a later lap's record starts on zeroed bytes, never on an earlier lap's") {
     // 16 KiB: the smallest ring whose record limit (bytes / 16) admits the 1000-byte payload.
     LogRing ring(4 * SMALL_RING);
     const std::array<std::uint32_t, 4> sizes{24, 200, 72, 1000};
     std::uint64_t read_position = 0;
     std::uint64_t index = 0;
     int padding_skipped = 0;
-    int stale_commit_words = 0;
-    int stale_payloads = 0;
+    int later_laps = 0;
+    int stale = 0;
     while (read_position < 4 * ring.bytes()) {
         const std::uint32_t size = sizes[index % sizes.size()];
         const LogRing::Reservation reservation = reserveOrFail(ring, size, false);
         if (reservation.position >= ring.bytes()) {
-            // The previous lap's commit word for this slot, still in place, is not this record's.
-            const std::uint64_t old = wordAt(ring, reservation.position);
-            if (old == ((reservation.position - ring.bytes()) ^ dvv::detail::LOG_COMMIT_MIX)) {
-                ++stale_commit_words;
-            }
-            if (reservation.payload[0] != std::byte{0}) {
-                ++stale_payloads;
+            // The previous lap's record in this slot was released, so zeroed: its commit word and
+            // payload are gone, and the unpublished commit word is 0.
+            ++later_laps;
+            if (wordAt(ring, reservation.position) != 0 ||
+                !std::all_of(reservation.payload, reservation.payload + reservation.size,
+                             [](std::byte value) { return value == std::byte{0}; })) {
+                ++stale;
             }
         }
         CHECK_FALSE(ring.read(reservation.position).has_value());
@@ -163,13 +164,14 @@ TEST_CASE("ring: stale bytes from earlier laps are never read as a record") {
         ++index;
     }
     CHECK(padding_skipped > 0);
-    CHECK(stale_commit_words > 0);
-    CHECK(stale_payloads > 0);
+    CHECK(later_laps > 0);
+    CHECK(stale == 0);
 }
 
 TEST_CASE("ring: a logged value that forges a commit word is not trusted") {
-    // R4: a payload word can equal a later position's commit word. Its header is then checked
-    // before read() trusts it.
+    // Defence in depth: release() keeps an earlier lap's bytes from every record start, but a
+    // payload word read at a position that is no record start can equal its commit word. Its
+    // header is then checked before read() trusts it.
     constexpr std::uint32_t FULL_PAYLOAD = (SMALL_RING / 16) - RING_HEADER;
     LogRing ring(SMALL_RING);
     std::vector<LogRing::Reservation> reservations;
@@ -224,6 +226,96 @@ TEST_CASE("ring: a logged value that forges a commit word is not trusted") {
     CHECK_FALSE(ring.read(NEAR_END).has_value());
     plant(NEAR_END, 100, PADDING);
     CHECK_FALSE(ring.read(NEAR_END).has_value());
+}
+
+TEST_CASE("ring: an earlier lap's payload is no commit word at a later record's start") {
+    // Lap 0 logs bytes that, at slot 40, look like the published record at 4096 + 40 with a valid
+    // header. Lap 1's first record ends at 4096 + 40, so the next one starts there; while its
+    // writer holds it unpublished, the reader must not take the earlier lap's bytes for it.
+    constexpr std::uint32_t FULL_PAYLOAD = (SMALL_RING / 16) - RING_HEADER;
+    constexpr std::uint32_t FIRST_PAYLOAD = 24;
+    constexpr std::uint64_t TARGET = SMALL_RING + RING_HEADER + FIRST_PAYLOAD;
+    LogRing ring(SMALL_RING);
+    std::uint64_t position = 0;
+    for (int i = 0; i < 16; ++i) {
+        const LogRing::Reservation reservation = reserveOrFail(ring, FULL_PAYLOAD, true);
+        fill(reservation, static_cast<std::uint64_t>(i));
+        if (i == 0) {
+            const std::uint64_t word = TARGET ^ dvv::detail::LOG_COMMIT_MIX;
+            const std::uint32_t size = 8;
+            const std::uint32_t kind = 0;
+            std::byte* forged = reservation.payload + ((TARGET % SMALL_RING) - RING_HEADER);
+            std::memcpy(forged, &word, sizeof(word));
+            std::memcpy(forged + 8, &size, sizeof(size));
+            std::memcpy(forged + 12, &kind, sizeof(kind));
+        }
+        ring.publish(reservation);
+    }
+    while (position < SMALL_RING) {
+        position = readOrFail(ring, position).next;
+    }
+    ring.release(position);
+
+    const LogRing::Reservation first = reserveOrFail(ring, FIRST_PAYLOAD, false);
+    REQUIRE(first.position == SMALL_RING);
+    fill(first, 99);
+    ring.publish(first);
+    const LogRing::Reservation held = reserveOrFail(ring, 8, false);
+    REQUIRE(held.position == TARGET);
+
+    const LogRing::Record record = readOrFail(ring, SMALL_RING);
+    REQUIRE(record.next == TARGET);
+    CHECK_FALSE(ring.read(TARGET).has_value());
+    ring.publish(held);
+    CHECK(readOrFail(ring, TARGET).position == TARGET);
+}
+
+TEST_CASE("ring: release zeroes the bytes it gives back, across the ring's end") {
+    // 16 KiB: the smallest ring whose record limit (bytes / 16) admits the 1000-byte payload.
+    LogRing ring(4 * SMALL_RING);
+    const std::array<std::uint32_t, 4> sizes{24, 200, 72, 1000};
+    CHECK(std::all_of(ring.base(), ring.base() + ring.bytes(),
+                      [](std::byte value) { return value == std::byte{0}; }));
+    std::uint64_t released = 0;
+    std::uint64_t index = 0;
+    int nonzero = 0;
+    int wrapped = 0;
+    while (released < 3 * ring.bytes()) {
+        // A few records per pass, so some passes cross the ring's end.
+        for (std::uint64_t i = 0; i < 3; ++i, ++index) {
+            const LogRing::Reservation reservation =
+                reserveOrFail(ring, sizes[index % sizes.size()], false);
+            fill(reservation, index);
+            ring.publish(reservation);
+        }
+        std::uint64_t position = released;
+        while (const std::optional<LogRing::Record> record = ring.read(position)) {
+            position = record->next;
+        }
+        if (released / ring.bytes() != position / ring.bytes()) {
+            ++wrapped;
+        }
+        ring.release(position);
+        for (std::uint64_t at = released; at < position; ++at) {
+            if (ring.base()[at % ring.bytes()] != std::byte{0}) {
+                ++nonzero;
+            }
+        }
+        released = position;
+    }
+    CHECK(wrapped > 0);
+    CHECK(nonzero == 0);
+}
+
+TEST_CASE("ring: unchanged() tells a record still held from one given back") {
+    LogRing ring(SMALL_RING);
+    const LogRing::Reservation reservation = reserveOrFail(ring, 32, false);
+    fill(reservation, 5);
+    ring.publish(reservation);
+    const LogRing::Record record = readOrFail(ring, 0);
+    CHECK(ring.unchanged(record));
+    ring.release(record.next);
+    CHECK_FALSE(ring.unchanged(record));
 }
 
 TEST_CASE("ring: limits") {
