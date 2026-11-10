@@ -236,11 +236,15 @@ TEST_CASE("split sink: strict name parsing") {
     using dvv::detail::parseSplitLogName;
     const auto plain = parseSplitLogName("p-20261110-153126.log", "p");
     REQUIRE(plain.has_value());
-    CHECK(plain.value().stamp == 20261110153126U);
-    CHECK(plain.value().number == 1U);
+    if (plain) {  // a guard clang-tidy's unchecked-optional-access check understands
+        CHECK(plain->stamp == 20261110153126U);
+        CHECK(plain->number == 1U);
+    }
     const auto suffixed = parseSplitLogName("p-20261110-153126-12.log", "p");
     REQUIRE(suffixed.has_value());
-    CHECK(suffixed.value().number == 12U);
+    if (suffixed) {
+        CHECK(suffixed->number == 12U);
+    }
     CHECK(parseSplitLogName("rawreel-20261110-153126.log", "rawreel").has_value());
 
     CHECK_FALSE(parseSplitLogName("p-old.log", "p").has_value());
