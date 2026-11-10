@@ -46,6 +46,7 @@ SystemLogSink::~SystemLogSink() {
 
 #if defined(_WIN32)
 
+// OutputDebugStringW has no levels: a mark is written like any line.
 void SystemLogSink::write(const LogRecord& /*record*/, std::string_view line) {
     if (line.size() > static_cast<std::size_t>(INT_MAX)) {
         return;
@@ -76,6 +77,9 @@ void SystemLogSink::write(const LogRecord& record, std::string_view line) {
         case LogLevel::Info: type = OS_LOG_TYPE_INFO; break;
         default: break;
     }
+    if (record.mark) {
+        type = OS_LOG_TYPE_DEFAULT;  // a mark: above Info, so it is kept like a notice
+    }
     // NOLINTBEGIN(bugprone-suspicious-stringview-data-usage,clang-diagnostic-unknown-attributes)
     os_log_with_type(static_cast<os_log_t>(log_), type, "%{public}.*s", clampedSize(line),
                      line.data());
@@ -91,6 +95,9 @@ void SystemLogSink::write(const LogRecord& record, std::string_view line) {
         case LogLevel::Warn: priority = LOG_WARNING; break;
         case LogLevel::Info: priority = LOG_INFO; break;
         default: break;
+    }
+    if (record.mark) {
+        priority = LOG_NOTICE;  // a mark: above Info, so it is kept like a notice
     }
     // NOLINTBEGIN(bugprone-suspicious-stringview-data-usage)
     syslog(priority, "%.*s", clampedSize(line), line.data());

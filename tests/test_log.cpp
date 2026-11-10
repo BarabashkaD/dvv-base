@@ -10,6 +10,7 @@
 #include <iterator>
 #include <memory>
 #include <random>
+#include <source_location>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -99,6 +100,24 @@ TEST_CASE("log lines carry time, level, message and file name") {
     CHECK(lines[0].find("Z INFO  opened 3 frames [test_log.cpp:") != std::string::npos);
 }
 
+TEST_CASE("formatLogRecord without source drops the location") {
+    const dvv::LogRecord record{dvv::LogLevel::Warn, "hello world", std::source_location::current(),
+                                std::chrono::system_clock::now()};
+    const std::string full = dvv::formatLogRecord(record);
+    CHECK(dvv::formatLogRecord(record, true) == full);
+    const std::string without = dvv::formatLogRecord(record, false);
+    const std::size_t cut = full.rfind(" [");
+    REQUIRE(cut != std::string::npos);
+    CHECK(full.ends_with("]"));
+    CHECK(without == full.substr(0, cut));
+    CHECK(without.find("test_log.cpp") == std::string::npos);
+    CHECK(without.ends_with("WARN  hello world"));
+}
+
+TEST_CASE("LogRecord::mark defaults to false") {
+    const dvv::LogRecord record;
+    CHECK_FALSE(record.mark);
+}
 TEST_CASE("messages below the level are dropped") {
     LoggerScope scope;
     auto sink = std::make_shared<dvv::MemorySink>();
@@ -495,6 +514,102 @@ TEST_CASE("sync: Logger::write keeps its run-time location") {
     CHECK(sink->lines()[0].ends_with(expected));
 }
 
+TEST_CASE("mark reaches a sink at Error but not a sink at Off") {
+    LoggerScope scope;
+    auto errors = std::make_shared<RecordSink>();
+    auto off = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(errors, dvv::LogLevel::Error);
+    dvv::Logger::instance().addSink(off, dvv::LogLevel::Off);
+    const auto where = std::source_location::current();
+    dvv::Logger::instance().mark("===== marker =====", where);
+    REQUIRE(errors->entries.size() == 1);
+    const auto& entry = errors->entries[0];
+    CHECK(entry.record.mark);
+    CHECK(entry.record.level == dvv::LogLevel::Info);
+    CHECK(entry.message == "===== marker =====");
+    CHECK(entry.record.where.line() == where.line());
+    CHECK(entry.line == dvv::formatLogRecord(entry.record));
+    CHECK(entry.line.find("INFO  ===== marker ===== [test_log.cpp:") != std::string::npos);
+    CHECK(off->entries.empty());
+}
+
+TEST_CASE("a plain Info record does not reach a sink at Warn") {
+    LoggerScope scope;
+    auto warnings = std::make_shared<RecordSink>();
+    auto all = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(warnings, dvv::LogLevel::Warn);
+    dvv::Logger::instance().addSink(all, dvv::LogLevel::Trace);
+    DVV_LOG_INFO("plain {}", 1);
+    dvv::Logger::instance().write(dvv::LogLevel::Info, "plain 2");
+    dvv::Logger::instance().mark("marked");
+    REQUIRE(warnings->entries.size() == 1);
+    CHECK(warnings->entries[0].message == "marked");
+    REQUIRE(all->entries.size() == 3);
+    CHECK_FALSE(all->entries[0].record.mark);
+    CHECK_FALSE(all->entries[1].record.mark);
+    CHECK(all->entries[2].record.mark);
+}
+
+TEST_CASE("mark ignores the logger level") {
+    LoggerScope scope;
+    auto sink = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(sink);
+    dvv::Logger::instance().setLevel(dvv::LogLevel::Error);
+    DVV_LOG_INFO("hidden");
+    dvv::Logger::instance().mark("at Error");
+    dvv::Logger::instance().setLevel(dvv::LogLevel::Off);
+    dvv::Logger::instance().mark("at Off");
+    REQUIRE(sink->entries.size() == 2);
+    CHECK(sink->entries[0].message == "at Error");
+    CHECK(sink->entries[1].message == "at Off");
+    CHECK(sink->entries[1].record.mark);
+}
+
+TEST_CASE("mark keeps order with records") {
+    LoggerScope scope;
+    auto sink = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(sink);
+    dvv::Logger::instance().write(dvv::LogLevel::Info, "a");
+    dvv::Logger::instance().mark("m");
+    dvv::Logger::instance().write(dvv::LogLevel::Info, "b");
+    REQUIRE(sink->entries.size() == 3);
+    CHECK(sink->entries[0].message == "a");
+    CHECK(sink->entries[1].message == "m");
+    CHECK(sink->entries[2].message == "b");
+    CHECK_FALSE(sink->entries[0].record.mark);
+    CHECK(sink->entries[1].record.mark);
+    CHECK_FALSE(sink->entries[2].record.mark);
+}
+
+TEST_CASE("mark with no sinks does nothing") {
+    LoggerScope scope;
+    dvv::Logger::instance().mark("nobody listens");
+    // A sink at Off is no listener either; one added later sees nothing of the earlier mark.
+    auto off = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(off, dvv::LogLevel::Off);
+    dvv::Logger::instance().mark("still nobody");
+    CHECK(off->entries.empty());
+    auto later = std::make_shared<RecordSink>();
+    dvv::Logger::instance().addSink(later);
+    CHECK(later->entries.empty());
+}
+
+TEST_CASE("a mark is flushed at once by RotatingFileSink") {
+    const TempDir temp("dvv-base-log-mark");
+    LoggerScope scope;
+    const auto path = temp.path() / "mark.log";
+    auto sink = dvv::RotatingFileSink::open(path, 100000, 1).value();
+    dvv::Logger::instance().addSink(sink);
+    DVV_LOG_INFO("buffered");
+    CHECK(readFile(path).empty());  // Info stays in the stream's buffer
+    dvv::Logger::instance().mark("===== marker =====");
+    // The sink is still open and flush() was never called.
+    const auto text = readFile(path);
+    CHECK(text.find("INFO  buffered") != std::string::npos);
+    CHECK(text.find("INFO  ===== marker =====") != std::string::npos);
+    dvv::Logger::instance().clearSinks();
+}
+
 TEST_CASE("system log sink accepts every level and a message with % signs") {
     LoggerScope scope;
     dvv::Logger::instance().setLevel(dvv::LogLevel::Trace);
@@ -505,6 +620,7 @@ TEST_CASE("system log sink accepts every level and a message with % signs") {
     DVV_LOG_WARN("warn {}", 4);
     DVV_LOG_ERROR("error {}", 5);
     DVV_LOG_INFO("100% {}", "%s %n %d");
+    dvv::Logger::instance().mark("mark 100% %s %n %d");
     dvv::Logger::instance().clearSinks();
     CHECK(true);
 }

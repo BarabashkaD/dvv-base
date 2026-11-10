@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <source_location>
@@ -35,10 +36,13 @@ struct LogRecord {
     std::string_view message;
     std::source_location where;
     std::chrono::system_clock::time_point time;
+    bool mark = false;  // a marker line from the app (the GUI "Mark" action), not a program message
 };
 
 // "2026-10-20T12:34:56.789Z INFO  message [file.cpp:42]"
 [[nodiscard]] std::string formatLogRecord(const LogRecord& record);
+// with_source false drops the " [file.cpp:42]" suffix; true is the one-argument form.
+[[nodiscard]] std::string formatLogRecord(const LogRecord& record, bool with_source);
 
 // Sinks are called one at a time: under the logger's lock in synchronous mode, on the log thread in
 // asynchronous mode (Logger::start). An implementation needs a lock only for data it shares with
@@ -60,7 +64,9 @@ public:
     void flush() override;
 };
 
-// The OS log: unified logging on macOS, syslog on Linux, OutputDebugStringW on Windows.
+// The OS log: unified logging on macOS, syslog on Linux, OutputDebugStringW on Windows. A mark
+// (LogRecord::mark) goes at the OS's default level: OS_LOG_TYPE_DEFAULT on macOS, LOG_NOTICE on
+// Linux.
 class SystemLogSink final : public ILogSink {
 public:
     explicit SystemLogSink(std::string identity);
@@ -90,9 +96,9 @@ private:
 // Writes <path>; when it would exceed max_bytes it is renamed to <path>.1 (older files shift up to
 // <path>.<max_files>) and a new file is started.
 //
-// Flushing: records of level Warn or higher are flushed to the file immediately; Info and below
-// stay buffered until the buffer fills, Logger::flush() or destruction, and in asynchronous mode
-// until the end of the log thread's pass (batchEnd).
+// Flushing: records of level Warn or higher and marks are flushed to the file immediately; Info and
+// below stay buffered until the buffer fills, Logger::flush() or destruction, and in asynchronous
+// mode until the end of the log thread's pass (batchEnd).
 //
 // Rotation goes through a staging file: <path> is first renamed to <path>.rotating, the backups are
 // shifted, and the staging file becomes <path>.1.
@@ -134,6 +140,91 @@ private:
     std::uintmax_t next_rotation_at_ = 0;  // no rotation before size_ reaches this
 };
 
+// Writes <folder>/<prefix>-YYYYMMDD-HHMMSS[-N].log, named by the local time of its creation. A
+// file is created exclusively (it never opens an existing one); a taken name moves on to the
+// suffix -2, -3, ... The newest file is found by parsing names strictly as that pattern and
+// comparing (timestamp, N), no suffix counting as 1; a name that does not match is never touched.
+//
+// open(append_newest = true) appends to the newest matching file below max_bytes, else (or when
+// that file cannot be opened for appending) creates a new file; open(false) always creates one.
+// A write that would pass max_bytes starts a new file first, unless the current file holds no line
+// yet (only its header, or nothing), so a line is never divided and a line larger than max_bytes
+// gets a file of its own. Never renames or deletes a file.
+//
+// Flushing: Warn and above and marks at once; Info and below buffered until the buffer fills,
+// flush(), batchEnd() in asynchronous mode, or destruction.
+//
+// Failure handling (notes go to stderr only, never to the Logger): if creating a new file fails,
+// the current file stays in use (over the limit) and the next attempt waits until another
+// max_bytes / 4 bytes were written. If a write or flush fails, the file is closed; a new file is
+// tried at once when the failed one had been started at least max_bytes / 4 bytes before,
+// otherwise once that much has been offered since it started. While no file is open the lines are
+// dropped. Bytes count from the lines passed to write(), dropped or not.
+class SplitFileSink final : public ILogSink {
+public:
+    // Creates the folder if needed. Fails for max_bytes 0, an empty prefix, or when no file can
+    // be opened.
+    [[nodiscard]] static Result<std::shared_ptr<SplitFileSink>> open(std::filesystem::path folder,
+                                                                     std::string prefix,
+                                                                     std::uintmax_t max_bytes,
+                                                                     bool append_newest);
+
+    ~SplitFileSink() override;
+    SplitFileSink(const SplitFileSink&) = delete;
+    SplitFileSink& operator=(const SplitFileSink&) = delete;
+    SplitFileSink(SplitFileSink&&) = delete;
+    SplitFileSink& operator=(SplitFileSink&&) = delete;
+
+    // The header of each new file: called under the sink's mutex when the sink creates a file,
+    // it returns the message of the file's first line, which the sink writes as an Info line
+    // (without a source location) and flushes. `previous` is the file the new one continues,
+    // empty for the file created by open(). Must not log or call back into this sink. If the
+    // file created by open() has no line yet, setHeader writes its header at once; an appended
+    // file gets none.
+    void setHeader(std::function<std::string(const std::filesystem::path& previous)> make);
+    // The file in use, or the last one if a failure closed it. Thread-safe.
+    [[nodiscard]] std::filesystem::path currentFile() const;
+    // The sizes of the matching files found by open(), plus every byte written since. Thread-safe.
+    [[nodiscard]] std::uintmax_t totalBytes() const;
+    // The files started since open() (open's own file not counted). Thread-safe.
+    [[nodiscard]] std::uint64_t splits() const;
+
+    void write(const LogRecord& record, std::string_view line) override;
+    void batchEnd() override;
+    void flush() override;
+
+private:
+    SplitFileSink(std::filesystem::path folder, std::string prefix, std::uintmax_t max_bytes);
+    // Creates a new file and makes it current, writing its header; true when a file is open
+    // afterwards. On failure the current file (if any) stays in use and the next attempt waits for
+    // max_bytes / 4. mutex_ held.
+    bool startFile();
+    // Writes make_header_(previous) as a flushed Info line. mutex_ held.
+    bool writeHeader(const std::filesystem::path& previous);
+    // Writes the line; on failure closes the file and returns false. mutex_ held.
+    bool writeLine(std::string_view line, bool flush_now);
+    void flushStream();
+    // Closes the file after a failed write or flush and sets the wait. mutex_ held.
+    void failFile();
+    [[nodiscard]] std::uintmax_t backoff() const noexcept;
+
+    mutable std::mutex mutex_;
+    std::filesystem::path folder_;
+    std::string prefix_;
+    std::uintmax_t max_bytes_;
+    std::ofstream stream_;
+    std::filesystem::path current_;
+    std::uintmax_t size_ = 0;             // bytes in the current file
+    bool has_lines_ = false;              // the current file holds a line (not only its header)
+    bool header_pending_ = false;         // the file open() created has neither header nor line yet
+    std::uintmax_t total_ = 0;            // totalBytes()
+    std::uint64_t splits_ = 0;            // splits()
+    std::uintmax_t offered_ = 0;          // bytes of all lines passed to write()
+    std::uintmax_t started_at_ = 0;       // offered_ when the current file was started
+    std::uintmax_t next_attempt_at_ = 0;  // no new file before offered_ reaches this
+    std::function<std::string(const std::filesystem::path&)> make_header_;
+};
+
 namespace detail {
 
 // A call site: its literal format string and location, built once as a static constexpr.
@@ -173,7 +264,8 @@ struct LogSnapshotBuffer;
 //     body size                         u32 (0xFFFFFFFF ends the records instead)
 //     kind, level, flags, arg count     4 x u8: kind 0 arguments, 1 text formatted by the
 //                                       caller (with its call site), 2 Logger::write text;
-//                                       LogLevel; flags bit 0 the bare "{}" warning
+//                                       LogLevel; flags bit 0 the bare "{}" warning,
+//                                       bit 1 mark (Logger::mark, level Info)
 //     site index                        u32 into the site table (0xFFFFFFFF: unknown)
 //     time                              i64 std::chrono::system_clock ticks since the epoch
 //     body                              encoded arguments (tag, value) or the message text
@@ -213,7 +305,8 @@ public:
     // clearSinks work only in synchronous mode: while the log thread runs they are ignored and log
     // an Error line.
     void addSink(std::shared_ptr<ILogSink> sink, LogLevel level = LogLevel::Trace);
-    // Allowed at any time.
+    // Allowed at any time. In asynchronous mode a sink's level is read when the log thread drains
+    // the queue, so a change also applies to records queued just before it.
     void setSinkLevel(const ILogSink& sink, LogLevel level);
     void clearSinks();
     void setLevel(LogLevel level) noexcept;
@@ -223,6 +316,12 @@ public:
     [[nodiscard]] bool enabled(LogLevel level) const noexcept;
     void write(LogLevel level, std::string_view message,
                std::source_location where = std::source_location::current());
+    // Delivers `text` as one record of level Info, flagged as a mark, to every sink whose level is
+    // not Off, ignoring the logger's level and the sinks' thresholds. In order with the other
+    // records: synchronous, under the same lock; asynchronous, through the queue with the priority
+    // of Warn, so a full ring drops it only when it would drop a warning (it is counted as a
+    // dropped Info message). Does nothing without sinks. Records the call site like a log macro.
+    void mark(std::string_view text, std::source_location where = std::source_location::current());
 
     // Asynchronous mode: starts the log thread "dvv-log"; from now on a call queues its message
     // and returns, and the log thread formats it and calls the sinks. A second call does nothing.
@@ -267,24 +366,25 @@ private:
     void submit(LogLevel level, const detail::LogSite& site, std::atomic<bool>& bare_warned,
                 const detail::LogPayload& payload);
     // Queues or delivers one message; `site` is null for text with its own location `where`.
+    // `flags` are the ring record's flags (log_ring.h): the bare "{}" warning, a mark.
     void route(LogLevel level, const detail::LogSite* site, std::source_location where,
-               const detail::LogPayload& payload, bool warn_bare);
+               const detail::LogPayload& payload, std::uint8_t flags);
     // The asynchronous path; false when the logger is synchronous (nothing queued).
     bool tryQueue(LogLevel level, const detail::LogSite* site, std::source_location where,
-                  const detail::LogPayload& payload, bool warn_bare) noexcept;
+                  const detail::LogPayload& payload, std::uint8_t flags) noexcept;
     // Encodes one record into the ring; false (and counted as dropped) when it does not fit.
     bool queueRecord(LogLevel level, const detail::LogSite* site, std::source_location where,
-                     const detail::LogPayload& payload, bool warn_bare) noexcept;
+                     const detail::LogPayload& payload, std::uint8_t flags) noexcept;
     void wakeLogThread() noexcept;
     void leaveFlight() noexcept;
     // The synchronous path; false when the logger became asynchronous (nothing delivered).
     bool deliverNow(LogLevel level, const detail::LogSite* site, std::source_location where,
-                    const detail::LogPayload& payload, bool warn_bare);
+                    const detail::LogPayload& payload, std::uint8_t flags);
     // Writes one record, then the bare-"{}" warning of `bare_site` if not null, under mutex_;
-    // false when the logger became asynchronous.
+    // false when the logger became asynchronous. A mark goes to every sink not at Off.
     bool deliver(LogLevel level, std::string_view message, std::source_location where,
-                 const detail::LogSite* bare_site);
-    // Recomputes gate_; mutex_ held.
+                 const detail::LogSite* bare_site, bool mark);
+    // Recomputes gate_ and marks_open_; mutex_ held.
     void updateGate() noexcept;
 
     // The log thread, and stop() after joining it.
@@ -295,7 +395,7 @@ private:
     void handleRecord(const std::byte* payload, std::uint32_t size) noexcept;
     void writeToSinks(const LogRecord& record, std::string_view line) noexcept;
     void emitLine(LogLevel level, std::string_view message, std::source_location where,
-                  std::chrono::system_clock::time_point time) noexcept;
+                  std::chrono::system_clock::time_point time, bool mark = false) noexcept;
     void reportDropped() noexcept;
     void reportSinkFailure(SinkEntry& entry, std::string_view what) noexcept;
     void endBatch() noexcept;
@@ -306,6 +406,8 @@ private:
     std::atomic<LogLevel> level_{LogLevel::Info};
     // max(level_, lowest sink level); Off without sinks. enabled() reads only this.
     std::atomic<LogLevel> gate_{LogLevel::Off};
+    // True when a sink's level is not Off; mark() reads only this.
+    std::atomic<bool> marks_open_{false};
 
     // Asynchronous mode. async_ changes only with mutex_ and control_mutex_ held.
     std::mutex control_mutex_;  // serializes start, stop and flush

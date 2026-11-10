@@ -29,15 +29,42 @@ log.stop();
 ### Sinks and levels
 
 A sink implements `ILogSink` (`write`, and optionally `batchEnd` and `flush`). Shipped sinks:
-`StderrSink`, `MemorySink`, `RotatingFileSink` and `SystemLogSink`. `addSink(sink, level)` gives the
-sink its own minimum level; `setSinkLevel` changes it at any time. `setLevel` sets the global
-minimum. `enabled(level)` is true when a call can reach a sink: the level is not `Off`, is at or
+`StderrSink`, `MemorySink`, `RotatingFileSink`, `SplitFileSink` and `SystemLogSink`.
+`addSink(sink, level)` gives the sink its own minimum level; `setSinkLevel` changes it at any time.
+`setLevel` sets the global minimum. `enabled(level)` is true when a call can reach a sink: the level is not `Off`, is at or
 above `level()` and at or above the lowest sink level. Without sinks the gate is closed and every
 call is a single atomic load.
 
 `SystemLogSink(identity)` writes to the OS log: os_log on macOS, syslog on Linux and
 `OutputDebugStringW` on Windows. On Linux `openlog` and `closelog` are process-global, so keep one
 `SystemLogSink` per process.
+
+### Marks
+
+`Logger::mark(text)` delivers `text` as one record of level Info with `LogRecord::mark` set. It goes
+to every sink whose level is not `Off`, whatever `level()` and the sinks' levels are, and does
+nothing without sinks. Synchronous: in order with the other records, under the logger's lock.
+Asynchronous: through the queue with the priority of Warn, so a full ring drops it only when it
+would drop a warning (counted as a dropped Info message). `RotatingFileSink` and `SplitFileSink`
+flush a mark at once; `SystemLogSink` writes it at the OS default level (`OS_LOG_TYPE_DEFAULT` on
+macOS, `LOG_NOTICE` on Linux). In a crash snapshot a mark is flag bit 1 of its record.
+
+`formatLogRecord(record)` gives `2026-10-20T12:34:56.789Z INFO  message [file.cpp:42]`;
+`formatLogRecord(record, false)` leaves out the ` [file.cpp:42]` suffix.
+
+### SplitFileSink
+
+`SplitFileSink::open(folder, prefix, max_bytes, append_newest)` writes
+`<folder>/<prefix>-YYYYMMDD-HHMMSS[-N].log`, named by the local time of the file's creation; a file
+is created exclusively and a taken name moves on to `-2`, `-3`, .... With `append_newest` the sink
+appends to the newest matching file below `max_bytes` (newest by timestamp, then N), otherwise it
+creates one. A write that would pass `max_bytes` starts a new file first, unless the current file
+holds no line yet, so a line is never divided. It never renames or deletes a file, and a name that
+does not match the pattern is never touched. `setHeader` sets the first line of each new file;
+`currentFile`, `totalBytes` and `splits` report its state. Warn and above and marks are flushed at
+once; Info and below at `flush()`, `batchEnd()` or destruction. When creating a file or writing
+fails, a note goes to stderr (never to the `Logger`); lines are dropped while no file is open, and a
+new file is tried after a back-off of `max_bytes / 4` bytes.
 
 ### Synchronous and asynchronous mode
 
