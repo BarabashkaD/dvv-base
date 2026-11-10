@@ -94,6 +94,51 @@ std::string readFile(const std::filesystem::path& file) {
 
 }  // namespace
 
+TEST_CASE("async: mark is delivered in asynchronous mode in order") {
+    const AsyncScope scope;
+    auto records = std::make_shared<RecordSink>();
+    auto errors = std::make_shared<RecordSink>();
+    auto off = std::make_shared<RecordSink>();
+    logger().addSink(records);
+    logger().addSink(errors, LogLevel::Error);
+    logger().addSink(off, LogLevel::Off);
+    logger().setLevel(LogLevel::Warn);
+    logger().start();
+    DVV_LOG_WARN("a {}", 1);
+    DVV_LOG_INFO("hidden {}", 2);  // below the logger level
+    const auto where = std::source_location::current();
+    logger().mark("m", where);
+    logger().write(LogLevel::Warn, "b");
+    logger().flush();
+
+    REQUIRE(records->entries.size() == 3);
+    CHECK(records->entries[0].message == "a 1");
+    CHECK(records->entries[1].message == "m");
+    CHECK(records->entries[2].message == "b");
+    CHECK_FALSE(records->entries[0].record.mark);
+    CHECK(records->entries[1].record.mark);
+    CHECK_FALSE(records->entries[2].record.mark);
+    CHECK(records->entries[1].record.level == LogLevel::Info);
+    CHECK(records->entries[1].record.where.line() == where.line());
+    CHECK(records->entries[1].line == dvv::formatLogRecord(records->entries[1].record));
+    REQUIRE(errors->entries.size() == 1);
+    CHECK(errors->entries[0].message == "m");
+    CHECK(errors->entries[0].record.mark);
+    CHECK(off->entries.empty());
+}
+
+TEST_CASE("async: mark with every sink at Off queues nothing") {
+    const AsyncScope scope;
+    auto off = std::make_shared<RecordSink>();
+    logger().addSink(off, LogLevel::Off);
+    logger().start();
+    const std::uint64_t before = dvv::detail::loggerRingForTest().writePosition();
+    logger().mark("nobody listens");
+    CHECK(dvv::detail::loggerRingForTest().writePosition() == before);
+    logger().stop();
+    CHECK(off->entries.empty());
+}
+
 TEST_CASE("async: messages reach the sinks in order, lines identical to synchronous mode") {
     const AsyncScope scope;
     auto records = std::make_shared<RecordSink>();
@@ -306,6 +351,35 @@ TEST_CASE("async: a blocked sink makes Info drop at 3/4 while Warn still queues"
     CHECK(dropped_index < warn_index);
     CHECK(countContaining(lines, "INFO  fill ") == calls - dropped);
     CHECK(dvv::detail::droppedForTest(LogLevel::Info) == 0);
+}
+
+TEST_CASE("async: mark survives a ring filled past 3/4") {
+    const AsyncScope scope;
+    auto sink = std::make_shared<GateSink>();
+    logger().addSink(sink);
+    logger().start();
+    const GateOpener opener{*sink};
+    constexpr std::uint64_t MAX_CALLS = 1'000'000;
+    std::uint64_t calls = 0;
+    while (dvv::detail::droppedForTest(LogLevel::Info) == 0 && calls < MAX_CALLS) {
+        DVV_LOG_INFO("fill {}", calls);
+        ++calls;
+    }
+    const std::uint64_t dropped = dvv::detail::droppedForTest(LogLevel::Info);
+    REQUIRE(dropped > 0);
+    // A plain Info is still refused, a mark (Info with Warn's priority) is not.
+    logger().write(LogLevel::Info, "plain after the drops");
+    CHECK(dvv::detail::droppedForTest(LogLevel::Info) == dropped + 1);
+    logger().mark("===== survivor =====");
+    CHECK(dvv::detail::droppedForTest(LogLevel::Info) == dropped + 1);
+    CHECK(dvv::detail::droppedForTest(LogLevel::Warn) == 0);
+    sink->open();
+    logger().flush();
+
+    const auto lines = sink->lines();
+    CHECK(countContaining(lines, "INFO  ===== survivor =====") == 1);
+    CHECK(countContaining(lines, "plain after the drops") == 0);
+    CHECK(countContaining(lines, "INFO  fill ") == calls - dropped);
 }
 
 namespace {

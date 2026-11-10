@@ -112,6 +112,9 @@ enum class LogRecordKind : std::uint8_t {
 
 // Set in LogRecordHeader::flags: the log thread warns about the site's bare "{}" after the record.
 inline constexpr std::uint8_t LOG_RECORD_WARN_BARE = 1;
+// Set in LogRecordHeader::flags: a Logger::mark record (level Info), reserved with Warn's
+// priority and delivered to every sink whose level is not Off.
+inline constexpr std::uint8_t LOG_RECORD_MARK = 2;
 
 struct LogRecordHeader {
     LogRecordKind kind = LogRecordKind::Arguments;
@@ -193,7 +196,7 @@ static_assert(LOG_SNAPSHOT_RECORD_HEADER_BYTES <= sizeof(LogRecordHeader));
 // The standard line of formatLogRecord from its parts, appended to `out`.
 void appendStandardLine(std::chrono::sys_time<std::chrono::milliseconds> time, LogLevel level,
                         std::string_view message, std::string_view file, std::uint_least32_t line,
-                        std::string& out);
+                        std::string& out, bool with_source = true);
 // The text of the warning about a call site that formats only "{}".
 [[nodiscard]] std::string bareWarningText(std::string_view file, std::uint_least32_t line);
 // The log thread's "N log messages dropped (E error, ...)" text from the counts Trace to Error.

@@ -399,6 +399,7 @@ struct HandBuilt {
     std::size_t records = 1;
     std::array<std::uint64_t, 5> dropped{};  // Trace to Error
     std::chrono::system_clock::duration time{};
+    std::uint8_t flags = 0;
 };
 
 // A hand-built snapshot: `records` Arguments records (an int 7 and the string "ab") naming site
@@ -418,7 +419,8 @@ std::vector<std::byte> handBuilt(std::string_view format, std::uint32_t site,
     putText(body, "ab");
     for (std::size_t record = 0; record < options.records; ++record) {
         put(out, static_cast<std::uint32_t>(body.size()));
-        put(out, std::array<std::uint8_t, 4>{0, static_cast<std::uint8_t>(LogLevel::Info), 0, 2});
+        put(out, std::array<std::uint8_t, 4>{0, static_cast<std::uint8_t>(LogLevel::Info),
+                                             options.flags, 2});
         put(out, site);
         put(out, static_cast<std::int64_t>(options.time.count()));
         out.insert(out.end(), body.begin(), body.end());
@@ -483,6 +485,44 @@ TEST_CASE("snapshot: Logger::write with run-time text and a run-time location") 
     REQUIRE(decoded.size() == 1);
     CHECK(decoded[0].ends_with(std::format("WARN  run-time text {} [test_log_snapshot.cpp:{}]{}",
                                            where.line(), where.line(), SUFFIX)));
+}
+
+TEST_CASE("snapshot keeps the mark bit") {
+    const AsyncScope scope;
+    dvv::detail::resetCrashSnapshotForTest();
+    auto sink = std::make_shared<GateSink>();
+    logger().addSink(sink, LogLevel::Error);
+    logger().start();
+    const GateOpener opener{*sink};
+    const std::source_location where = std::source_location::current();
+    logger().mark("===== marker =====", where);
+
+    const std::vector<std::byte> bytes = snapshot();
+    // The first record's header: body size (u32), then kind, level, flags, argument count.
+    constexpr std::size_t FLAGS_OFFSET = dvv::detail::LOG_SNAPSHOT_HEADER_BYTES + 4 + 2;
+    REQUIRE(bytes.size() > FLAGS_OFFSET);
+    CHECK(std::to_integer<std::uint8_t>(bytes[FLAGS_OFFSET - 1]) ==
+          static_cast<std::uint8_t>(LogLevel::Info));
+    CHECK(std::to_integer<std::uint8_t>(bytes[FLAGS_OFFSET]) == dvv::detail::LOG_RECORD_MARK);
+    CHECK(dvv::detail::LOG_RECORD_MARK == 2);
+    const std::vector<std::string> decoded = dvv::decodeCrashSnapshot(bytes);
+    REQUIRE(decoded.size() == 1);
+    CHECK(decoded[0].ends_with(std::format("INFO  ===== marker ===== [test_log_snapshot.cpp:{}]{}",
+                                           where.line(), SUFFIX)));
+
+    sink->open();
+    logger().stop();
+    const std::vector<std::string> lines = sink->lines();
+    REQUIRE(lines.size() == 1);
+    CHECK(decoded[0] == lines[0] + std::string(SUFFIX));
+}
+
+TEST_CASE("snapshot: a hand-built record with the mark bit decodes as its Info line") {
+    HandBuilt options;
+    options.flags = dvv::detail::LOG_RECORD_MARK;
+    CHECK(dvv::decodeCrashSnapshot(handBuilt("{} {}", 0, options)) ==
+          std::vector<std::string>{
+              std::format("1970-01-01T00:00:00.000Z INFO  7 ab [a.cpp:12]{}", SUFFIX)});
 }
 
 TEST_CASE("snapshot: a hostile snapshot cannot make the decoder's output explode") {

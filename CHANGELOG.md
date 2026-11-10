@@ -6,6 +6,26 @@ the dvv rules: compatible = the same major and at least the minimum version, als
 changes only in a new major, after a deprecation. This file is the release notes (there are no
 GitHub Releases).
 
+## [0.4.0] - 2026-11-10
+
+### Added
+- `LogRecord::mark`: a marker line from the app, not a program message.
+- `Logger::mark(text)`: delivers `text` as one Info record flagged as a mark to every sink whose
+  level is not `Off`, ignoring the logger's level and the sinks' levels. Synchronous: in order with
+  the other records, under the logger's lock. Asynchronous: through the queue with the priority of
+  Warn, so a full ring drops it only when it would drop a warning (counted as a dropped Info
+  message). Does nothing without sinks. In the crash snapshot a mark is flag bit 1 of its record.
+- `RotatingFileSink` flushes a mark to the file at once, like Warn and above.
+- `SystemLogSink` writes a mark at the OS default level: `OS_LOG_TYPE_DEFAULT` on macOS,
+  `LOG_NOTICE` on Linux.
+- `formatLogRecord(record, with_source)`: `false` drops the ` [file.cpp:42]` suffix; the
+  one-argument form is the same as `true`.
+- `SplitFileSink`: writes `<prefix>-YYYYMMDD-HHMMSS[-N].log` files named by the local time of their
+  creation and starts a new file before a line would pass `max_bytes`. Never renames or deletes a
+  file. `open(folder, prefix, max_bytes, append_newest)`, `setHeader`, `currentFile`, `totalBytes`
+  and `splits`. Warn and above and marks are flushed at once. Failures are noted on stderr and
+  retried with a back-off of `max_bytes / 4`.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added

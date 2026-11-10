@@ -644,6 +644,7 @@ bool appendRecordLines(const SnapshotRecord& record, const std::vector<SnapshotS
     if (!budget.take(text.size())) {
         return false;
     }
+    // A mark (flags bit LOG_RECORD_MARK) is the Info line above; the bit needs nothing more here.
     lines.push_back(std::move(text));
     if ((record.flags & detail::LOG_RECORD_WARN_BARE) != 0 && kind != LogRecordKind::LocationText &&
         site != nullptr) {

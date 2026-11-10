@@ -25,9 +25,12 @@ namespace detail {
 
 void appendStandardLine(std::chrono::sys_time<std::chrono::milliseconds> time, LogLevel level,
                         std::string_view message, std::string_view file, std::uint_least32_t line,
-                        std::string& out) {
-    std::format_to(std::back_inserter(out), "{:%Y-%m-%dT%H:%M:%S}Z {:<5} {} [{}:{}]", time,
-                   logLevelName(level), message, file, line);
+                        std::string& out, bool with_source) {
+    std::format_to(std::back_inserter(out), "{:%Y-%m-%dT%H:%M:%S}Z {:<5} {}", time,
+                   logLevelName(level), message);
+    if (with_source) {
+        std::format_to(std::back_inserter(out), " [{}:{}]", file, line);
+    }
 }
 
 std::string bareWarningText(std::string_view file, std::uint_least32_t line) {
@@ -61,10 +64,10 @@ std::string droppedText(const std::array<std::uint64_t, 5>& dropped) {
 namespace {
 
 // formatLogRecord into `out`; the log thread keeps `out` between records.
-void appendLogLine(const LogRecord& record, std::string& out) {
+void appendLogLine(const LogRecord& record, std::string& out, bool with_source = true) {
     detail::appendStandardLine(std::chrono::time_point_cast<std::chrono::milliseconds>(record.time),
                                record.level, record.message, sourceFileName(record.where),
-                               record.where.line(), out);
+                               record.where.line(), out, with_source);
 }
 
 }  // namespace
@@ -84,6 +87,12 @@ std::string_view logLevelName(LogLevel level) noexcept {
 std::string formatLogRecord(const LogRecord& record) {
     std::string line;
     appendLogLine(record, line);
+    return line;
+}
+
+std::string formatLogRecord(const LogRecord& record, bool with_source) {
+    std::string line;
+    appendLogLine(record, line, with_source);
     return line;
 }
 
@@ -158,7 +167,7 @@ void RotatingFileSink::write(const LogRecord& record, std::string_view line) {
     stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
     stream_.put('\n');
     size_ += needed;
-    if (record.level >= LogLevel::Warn) {
+    if (record.level >= LogLevel::Warn || record.mark) {
         stream_.flush();
     }
 }
@@ -282,6 +291,12 @@ constexpr std::size_t levelIndex(LogLevel level) noexcept {
 // The text a record may hold: the same budget as the encoded arguments.
 constexpr std::size_t TEXT_BUDGET = detail::LOG_MAX_RECORD_BYTES - detail::LOG_RECORD_HEADER_BYTES;
 
+// Whether a sink at `sink_level` takes a record: a mark goes to every sink not at Off, any other
+// record only at or above the sink's level.
+constexpr bool sinkTakes(LogLevel record_level, bool mark, LogLevel sink_level) noexcept {
+    return mark ? sink_level != LogLevel::Off : record_level >= sink_level;
+}
+
 }  // namespace
 
 Logger& Logger::instance() noexcept {
@@ -351,6 +366,7 @@ void Logger::updateGate() noexcept {
         lowest = std::min(lowest, entry->level.load(std::memory_order_relaxed));
     }
     gate_.store(std::max(level(), lowest), std::memory_order_relaxed);
+    marks_open_.store(lowest != LogLevel::Off, std::memory_order_relaxed);
 }
 
 void Logger::write(LogLevel level, std::string_view message, std::source_location where) {
@@ -359,33 +375,43 @@ void Logger::write(LogLevel level, std::string_view message, std::source_locatio
     }
     detail::LogPayload payload;
     payload.text = message;
-    route(level, nullptr, where, payload, false);
+    route(level, nullptr, where, payload, 0);
+}
+
+void Logger::mark(std::string_view text, std::source_location where) {
+    // Not enabled(): a mark ignores the logger's level and the sinks' thresholds.
+    if (!marks_open_.load(std::memory_order_relaxed)) {
+        return;
+    }
+    detail::LogPayload payload;
+    payload.text = text;
+    route(LogLevel::Info, nullptr, where, payload, detail::LOG_RECORD_MARK);
 }
 
 void Logger::submit(LogLevel level, const detail::LogSite& site, std::atomic<bool>& bare_warned,
                     const detail::LogPayload& payload) {
     const bool warn_bare =
         site.bareBraces && !bare_warned.exchange(true, std::memory_order_relaxed);
-    route(level, &site, site.where, payload, warn_bare);
+    route(level, &site, site.where, payload, warn_bare ? detail::LOG_RECORD_WARN_BARE : 0);
 }
 
 void Logger::route(LogLevel level, const detail::LogSite* site, std::source_location where,
-                   const detail::LogPayload& payload, bool warn_bare) {
+                   const detail::LogPayload& payload, std::uint8_t flags) {
     // start() and stop() switch the mode under mutex_; each path re-checks it and hands over to
     // the other when it changed meanwhile.
     for (;;) {
         if (async_.load(std::memory_order_relaxed) &&
-            tryQueue(level, site, where, payload, warn_bare)) {
+            tryQueue(level, site, where, payload, flags)) {
             return;
         }
-        if (deliverNow(level, site, where, payload, warn_bare)) {
+        if (deliverNow(level, site, where, payload, flags)) {
             return;
         }
     }
 }
 
 bool Logger::tryQueue(LogLevel level, const detail::LogSite* site, std::source_location where,
-                      const detail::LogPayload& payload, bool warn_bare) noexcept {
+                      const detail::LogPayload& payload, std::uint8_t flags) noexcept {
     // Counted before the mode is read (both seq_cst, as stop() stores the mode and then reads the
     // count): stop() either sees this writer or this writer sees synchronous mode.
     in_flight_.fetch_add(1);
@@ -393,7 +419,7 @@ bool Logger::tryQueue(LogLevel level, const detail::LogSite* site, std::source_l
         leaveFlight();
         return false;
     }
-    if (queueRecord(level, site, where, payload, warn_bare)) {
+    if (queueRecord(level, site, where, payload, flags)) {
         // §5.5: the record's commit word (a release store), then the exchange on asleep_. The
         // fence pairs with the log thread's fence between its store of asleep_ and its re-check.
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -404,11 +430,11 @@ bool Logger::tryQueue(LogLevel level, const detail::LogSite* site, std::source_l
 }
 
 bool Logger::queueRecord(LogLevel level, const detail::LogSite* site, std::source_location where,
-                         const detail::LogPayload& payload, bool warn_bare) noexcept {
+                         const detail::LogPayload& payload, std::uint8_t flags) noexcept {
     using detail::LogRecordKind;
     detail::LogRecordHeader header;
     header.level = level;
-    header.flags = warn_bare ? detail::LOG_RECORD_WARN_BARE : 0;
+    header.flags = flags;
     header.time = std::chrono::system_clock::now().time_since_epoch().count();
     std::string_view text = payload.text;
     bool cut = false;
@@ -439,8 +465,9 @@ bool Logger::queueRecord(LogLevel level, const detail::LogSite* site, std::sourc
     const std::size_t payload_bytes = sizeof(header) + body;
     std::optional<detail::LogRing::Reservation> reservation;
     if (payload_bytes <= detail::LOG_MAX_RECORD_BYTES) {
-        reservation =
-            ring_->reserve(static_cast<std::uint32_t>(payload_bytes), level >= LogLevel::Warn);
+        // A mark has Warn's priority: it may fill the whole ring, as Warn and Error may.
+        const bool urgent = level >= LogLevel::Warn || (flags & detail::LOG_RECORD_MARK) != 0;
+        reservation = ring_->reserve(static_cast<std::uint32_t>(payload_bytes), urgent);
     }
     if (!reservation) {
         dropped_[levelIndex(level)].fetch_add(1, std::memory_order_relaxed);
@@ -478,10 +505,11 @@ void Logger::leaveFlight() noexcept {
 }
 
 bool Logger::deliverNow(LogLevel level, const detail::LogSite* site, std::source_location where,
-                        const detail::LogPayload& payload, bool warn_bare) {
-    const detail::LogSite* bare_site = warn_bare ? site : nullptr;
+                        const detail::LogPayload& payload, std::uint8_t flags) {
+    const detail::LogSite* bare_site = (flags & detail::LOG_RECORD_WARN_BARE) != 0 ? site : nullptr;
+    const bool mark = (flags & detail::LOG_RECORD_MARK) != 0;
     if (payload.format == nullptr) {
-        return deliver(level, payload.text, where, bare_site);
+        return deliver(level, payload.text, where, bare_site, mark);
     }
     // Never the ring: a per-thread scratch buffer sized from the encoder's own result.
     thread_local std::vector<std::byte> scratch;
@@ -489,12 +517,12 @@ bool Logger::deliverNow(LogLevel level, const detail::LogSite* site, std::source
     payload.encode(scratch.data(), payload.context);
     std::string text;
     payload.format(scratch.data(), site->format, text);
-    return deliver(level, text, where, bare_site);
+    return deliver(level, text, where, bare_site, mark);
 }
 
 bool Logger::deliver(LogLevel level, std::string_view message, std::source_location where,
-                     const detail::LogSite* bare_site) {
-    const LogRecord record{level, message, where, std::chrono::system_clock::now()};
+                     const detail::LogSite* bare_site, bool mark) {
+    const LogRecord record{level, message, where, std::chrono::system_clock::now(), mark};
     const std::string line = formatLogRecord(record);
     std::string warning_text;
     if (bare_site != nullptr) {
@@ -508,7 +536,7 @@ bool Logger::deliver(LogLevel level, std::string_view message, std::source_locat
         return false;  // start() switched the mode meanwhile: the log thread owns the sinks
     }
     for (const auto& entry : sinks_) {
-        if (level >= entry->level.load(std::memory_order_relaxed)) {
+        if (sinkTakes(level, mark, entry->level.load(std::memory_order_relaxed))) {
             entry->sink->write(record, line);
         }
     }
@@ -687,8 +715,9 @@ void Logger::handleRecord(const std::byte* payload, std::uint32_t size) noexcept
     const std::source_location where = site != nullptr ? site->where : detail::locationOf(header);
     const std::chrono::system_clock::time_point time{
         std::chrono::system_clock::duration{header.time}};
+    const bool mark = (header.flags & detail::LOG_RECORD_MARK) != 0;
     const bool accepted = std::ranges::any_of(sinks_, [&](const auto& entry) {
-        return header.level >= entry->level.load(std::memory_order_relaxed);
+        return sinkTakes(header.level, mark, entry->level.load(std::memory_order_relaxed));
     });
     if (accepted) {
         try {
@@ -700,7 +729,7 @@ void Logger::handleRecord(const std::byte* payload, std::uint32_t size) noexcept
             } else {
                 message = {reinterpret_cast<const char*>(body), header.textSize};
             }
-            emitLine(header.level, message, where, time);
+            emitLine(header.level, message, where, time, mark);
         } catch (...) {
             // Formatting failed (out of memory): the message is lost and counted.
             dropped_[levelIndex(header.level)].fetch_add(1, std::memory_order_relaxed);
@@ -717,8 +746,8 @@ void Logger::handleRecord(const std::byte* payload, std::uint32_t size) noexcept
 }
 
 void Logger::emitLine(LogLevel level, std::string_view message, std::source_location where,
-                      std::chrono::system_clock::time_point time) noexcept {
-    const LogRecord record{level, message, where, time};
+                      std::chrono::system_clock::time_point time, bool mark) noexcept {
+    const LogRecord record{level, message, where, time, mark};
     try {
         line_buffer_.clear();
         appendLogLine(record, line_buffer_);
@@ -731,7 +760,7 @@ void Logger::emitLine(LogLevel level, std::string_view message, std::source_loca
 
 void Logger::writeToSinks(const LogRecord& record, std::string_view line) noexcept {
     for (const auto& entry : sinks_) {
-        if (record.level < entry->level.load(std::memory_order_relaxed)) {
+        if (!sinkTakes(record.level, record.mark, entry->level.load(std::memory_order_relaxed))) {
             continue;
         }
         try {
@@ -778,7 +807,7 @@ void Logger::reportSinkFailure(SinkEntry& entry, std::string_view what) noexcept
         const std::string text = std::format("a log sink failed: {}", what);
         detail::LogPayload payload;
         payload.text = text;
-        queueRecord(LogLevel::Warn, nullptr, std::source_location::current(), payload, false);
+        queueRecord(LogLevel::Warn, nullptr, std::source_location::current(), payload, 0);
     } catch (...) {
         // Out of memory: the report is lost and counted.
         dropped_[levelIndex(LogLevel::Warn)].fetch_add(1, std::memory_order_relaxed);

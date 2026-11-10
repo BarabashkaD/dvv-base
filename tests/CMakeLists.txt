@@ -14,6 +14,7 @@ add_executable(dvv_base_tests
     test_log_ring.cpp
     test_log_snapshot.cpp
     test_paths.cpp
+    test_split_file_sink.cpp
     test_task.cpp
     test_uri.cpp
     test_when_all.cpp)
