@@ -11,6 +11,7 @@
 
 #include "dvv/base/log.h"
 #include "split_file_sink_detail.h"
+#include "utf8_path.h"
 
 namespace dvv {
 
@@ -93,19 +94,8 @@ namespace {
 // A clash moves on to the next suffix at most this far.
 constexpr std::uint32_t MAX_SUFFIX = 1000;
 
-std::string utf8(const std::filesystem::path& path) {
-    const std::u8string units = path.u8string();
-    std::string text(units.size(), '\0');
-    std::ranges::transform(units, text.begin(),
-                           [](char8_t unit) { return static_cast<char>(unit); });
-    return text;
-}
-
-std::filesystem::path pathFromUtf8(std::string_view text) {
-    std::u8string units(text.size(), u8'\0');
-    std::ranges::transform(text, units.begin(), [](char c) { return static_cast<char8_t>(c); });
-    return {units};
-}
+using detail::pathFromUtf8;
+using detail::utf8;
 
 // A failure note: stderr only, never the Logger (the sink runs under its lock).
 void note(std::string_view text) {

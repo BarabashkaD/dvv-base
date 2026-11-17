@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.2)
-project(dvv_base VERSION 0.4.0 DESCRIPTION "dvv base library" LANGUAGES CXX)
+project(dvv_base VERSION 0.4.1 DESCRIPTION "dvv base library" LANGUAGES CXX)
 # Version string; a pre-release build adds its release-stage label (user decision U-M4ORDER).
 set(dvv_base_VERSION_STRING "${PROJECT_VERSION}")
 
@@ -47,8 +47,13 @@ target_include_directories(dvv_base PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dvv_base PUBLIC Threads::Threads nlohmann_json::nlohmann_json)
+# The per-user directory rules of the target OS (src/paths_rules.h).
 if(WIN32)
-    target_link_libraries(dvv_base PRIVATE shell32 ole32)
+    target_sources(dvv_base PRIVATE src/paths_win32.cpp)
+elseif(APPLE)
+    target_sources(dvv_base PRIVATE src/paths_macos.cpp)
+else()
+    target_sources(dvv_base PRIVATE src/paths_linux.cpp)
 endif()
 dvv_set_compiler_options(dvv_base)
 

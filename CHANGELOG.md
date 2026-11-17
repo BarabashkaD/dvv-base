@@ -6,6 +6,32 @@ the dvv rules: compatible = the same major and at least the minimum version, als
 changes only in a new major, after a deprecation. This file is the release notes (there are no
 GitHub Releases).
 
+## [0.4.1] - 2026-11-17
+
+### Fixed
+- On Windows `paths::userDataDir` and `paths::userCacheDir` honour `APPDATA` / `LOCALAPPDATA` when
+  they hold an absolute path, so a test that points them at a test folder no longer reads the real
+  user folders.
+- On Windows the app name is read as UTF-8, like the variables (before, a non-ASCII name went
+  through the ANSI code page).
+
+### Changed
+- Windows no longer uses `SHGetKnownFolderPath`: the directories come only from environment
+  variables, like on macOS and Linux: `APPDATA` / `LOCALAPPDATA`, otherwise `USERPROFILE` +
+  `AppData\Roaming` / `AppData\Local`. An `APPDATA` / `LOCALAPPDATA` that differs from the known
+  folder now wins (for example one inherited by a process started with `runas /noprofile`), and a
+  process with none of `APPDATA` / `LOCALAPPDATA` / `USERPROFILE` set now gets an error
+  (`APPDATA is not set; USERPROFILE is not set`, or the `LOCALAPPDATA` form) instead of the known
+  folder. dvv-base no longer links `shell32` and `ole32`.
+- On macOS and Linux a relative `HOME` is no longer used: on macOS the directories fail with
+  `HOME is not an absolute path`, on Linux too when no XDG variable gives a folder (before, the
+  relative path was used).
+- When no source gives a folder, the error names every source tried, joined by `; ` (for example
+  `XDG_DATA_HOME is not set; HOME is not set` on Linux); on macOS an unset `HOME` still gives
+  `HOME is not set`.
+- The per-OS sources are data in one file per OS (`src/paths_macos.cpp`, `src/paths_linux.cpp`,
+  `src/paths_win32.cpp`) and one algorithm reads them. The results for normal users are unchanged.
+
 ## [0.4.0] - 2026-11-10
 
 ### Added
