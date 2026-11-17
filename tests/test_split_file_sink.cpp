@@ -19,6 +19,7 @@
 
 #include "dvv/base/log.h"
 #include "split_file_sink_detail.h"
+#include "utf8_path.h"
 
 #if !defined(_WIN32)
 #include <csignal>
@@ -89,11 +90,7 @@ void writeFile(const std::filesystem::path& file, const std::string& content) {
 }
 
 std::string utf8Name(const std::filesystem::path& file) {
-    const std::u8string name = file.filename().u8string();
-    std::string text;
-    std::ranges::transform(name, std::back_inserter(text),
-                           [](char8_t unit) { return static_cast<char>(unit); });
-    return text;
+    return dvv::detail::utf8(file.filename());
 }
 
 // The names of the regular files in `folder`, sorted.

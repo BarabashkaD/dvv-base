@@ -3,19 +3,18 @@
 #include <climits>
 #include <cstdint>
 #include <format>
+#include <initializer_list>
+#include <iterator>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
-#include "dvv/base/environment.h"
+#include "paths_rules.h"
+#include "utf8_path.h"
 
 #if defined(_WIN32)
-// windows.h must come first.
-// clang-format off
 #include <windows.h>
-#include <knownfolders.h>
-#include <shlobj.h>
-// clang-format on
 #elif defined(__linux__)
 #include <unistd.h>
 #elif defined(__APPLE__)
@@ -24,80 +23,81 @@
 
 namespace dvv::paths {
 
+namespace detail {
+
+namespace {
+
+using dvv::detail::pathFromUtf8;
+
+// <base>/<relative>/<app>/<tail>; an empty part adds nothing (no trailing separator). Every part
+// goes through pathFromUtf8, so the app name (UTF-8) and the ASCII literals are joined the same
+// way.
+std::filesystem::path join(std::filesystem::path base, std::string_view relative,
+                           std::string_view app, std::string_view tail) {
+    for (const std::string_view part : {relative, app, tail}) {
+        if (!part.empty()) {
+            base /= pathFromUtf8(part);
+        }
+    }
+    return base;
+}
+
+}  // namespace
+
+Result<std::filesystem::path> resolveDir(const DirRule& rule, std::string_view app,
+                                         EnvironmentReader read) {
+    if (rule.sources.empty()) {
+        return makeError(Errc::Internal, "a folder rule has no source");
+    }
+    std::string tried;
+    // Adds one source's reason to the list.
+    const auto note = [&tried](std::string_view reason) {
+        std::format_to(std::back_inserter(tried), "{}{}", tried.empty() ? "" : "; ", reason);
+    };
+    for (const DirSource& source : rule.sources) {
+        const std::optional<std::string> value = read(source.variable);
+        if (!value || value->empty()) {
+            note(std::format("{} is not set", source.variable));
+            continue;
+        }
+        auto base = pathFromUtf8(*value);
+        if (!base.is_absolute()) {
+            note(std::format("{} is not an absolute path", source.variable));
+            continue;
+        }
+        return join(std::move(base), source.relative, app, rule.tail);
+    }
+    return makeError(Errc::Io, std::move(tried));
+}
+
+}  // namespace detail
+
 namespace {
 
 Result<void> checkApp(std::string_view app) {
+    // Not allowed in the name; the explicit length keeps the NUL in the set.
+    constexpr std::string_view FORBIDDEN_APP_CHARS{"/\\:\0", 4};
     if (app.empty() || app == "." || app == ".." ||
-        app.find_first_of("/\\:") != std::string_view::npos) {
+        app.find_first_of(FORBIDDEN_APP_CHARS) != std::string_view::npos) {
         return makeError(Errc::Internal, "application name must be a plain directory name");
+    }
+    // pathFromUtf8 (path from u8string) would throw on Windows for a name that is not valid UTF-8.
+    if (!dvv::detail::isValidUtf8(app)) {
+        return makeError(Errc::Internal, "application name must be valid UTF-8");
     }
     return {};
 }
-
-#if defined(_WIN32)
-Result<std::filesystem::path> knownFolder(const KNOWNFOLDERID& id) {
-    PWSTR raw = nullptr;
-    const HRESULT result = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &raw);
-    if (FAILED(result) || raw == nullptr) {
-        CoTaskMemFree(raw);
-        return makeError(Errc::Io, "cannot query a Windows known folder");
-    }
-    std::filesystem::path folder(raw);
-    CoTaskMemFree(raw);
-    return folder;
-}
-#elif defined(__APPLE__)
-// $HOME/<relative>; XDG variables are not used on macOS.
-Result<std::filesystem::path> homeDir(std::string_view relative) {
-    const auto home = getEnvironment("HOME");
-    if (!home || home->empty()) {
-        return makeError(Errc::Io, "HOME is not set");
-    }
-    return std::filesystem::path(*home) / relative;
-}
-#else
-// $variable when it holds an absolute path, otherwise $HOME/<fallback>.
-Result<std::filesystem::path> xdgDir(std::string_view variable, std::string_view fallback) {
-    if (const auto value = getEnvironment(variable)) {
-        std::filesystem::path dir(*value);
-        if (dir.is_absolute()) {
-            return dir;
-        }
-    }
-    const auto home = getEnvironment("HOME");
-    if (!home || home->empty()) {
-        return makeError(Errc::Io, "HOME is not set");
-    }
-    return std::filesystem::path(*home) / fallback;
-}
-#endif
 
 }  // namespace
 
 Result<std::filesystem::path> userDataDir(std::string_view app) {
     DVV_TRY_VOID(checkApp(app));
-#if defined(_WIN32)
-    DVV_TRY(auto base, knownFolder(FOLDERID_RoamingAppData));
-#elif defined(__APPLE__)
-    DVV_TRY(auto base, homeDir("Library/Application Support"));
-#else
-    DVV_TRY(auto base, xdgDir("XDG_DATA_HOME", ".local/share"));
-#endif
-    return base / app;
+    return detail::resolveDir(detail::userDataRule(), app);
 }
 
 Result<std::filesystem::path> userCacheDir(std::string_view app) {
     DVV_TRY_VOID(checkApp(app));
-#if defined(_WIN32)
-    DVV_TRY(auto base, knownFolder(FOLDERID_LocalAppData));
-    return base / app / "cache";
-#elif defined(__APPLE__)
-    DVV_TRY(auto base, homeDir("Library/Caches"));
-    return base / app;
-#else
-    DVV_TRY(auto base, xdgDir("XDG_CACHE_HOME", ".cache"));
-    return base / app;
-#endif
+    return detail::resolveDir(detail::userCacheRule(), app);
 }
 
 Result<std::filesystem::path> executablePath() {

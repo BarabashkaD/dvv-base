@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdlib>
 
+#include "utf8_path.h"
+
 #if defined(_WIN32)
 #include <climits>
 
@@ -13,50 +15,7 @@ namespace dvv {
 
 namespace {
 
-// Well-formed UTF-8 (RFC 3629): no overlong forms, no surrogates, nothing above U+10FFFF.
-bool isValidUtf8(std::string_view text) noexcept {
-    std::size_t i = 0;
-    while (i < text.size()) {
-        const auto lead = static_cast<unsigned char>(text[i]);
-        if (lead < 0x80) {
-            ++i;
-            continue;
-        }
-        std::size_t length = 0;
-        char32_t code = 0;
-        char32_t minimum = 0;
-        if ((lead & 0xE0) == 0xC0) {
-            length = 2;
-            code = lead & 0x1F;
-            minimum = 0x80;
-        } else if ((lead & 0xF0) == 0xE0) {
-            length = 3;
-            code = lead & 0x0F;
-            minimum = 0x800;
-        } else if ((lead & 0xF8) == 0xF0) {
-            length = 4;
-            code = lead & 0x07;
-            minimum = 0x10000;
-        } else {
-            return false;
-        }
-        if (text.size() - i < length) {
-            return false;
-        }
-        for (std::size_t k = 1; k < length; ++k) {
-            const auto next = static_cast<unsigned char>(text[i + k]);
-            if ((next & 0xC0) != 0x80) {
-                return false;
-            }
-            code = (code << 6) | (next & 0x3F);
-        }
-        if (code < minimum || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
-            return false;
-        }
-        i += length;
-    }
-    return true;
-}
+using detail::isValidUtf8;
 
 bool validValue(std::string_view value) noexcept {
     return value.find('\0') == std::string_view::npos && isValidUtf8(value);
