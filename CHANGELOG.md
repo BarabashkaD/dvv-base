@@ -6,6 +6,48 @@ the dvv rules: compatible = the same major and at least the minimum version, als
 changes only in a new major, after a deprecation. This file is the release notes (there are no
 GitHub Releases).
 
+## [0.5.0] - 2026-11-19
+
+One owner for UTF-8, path and UTF-16 text and for local time; named flags; requires dvv-build 0.5.0.
+
+### Added
+- `dvv/base/utf8.h`: `isValidUtf8`; `pathText` and `pathFromText`, the round-trip path text (the
+  native bytes on POSIX, so a name that is not UTF-8 stays usable); `pathDisplayText`, always
+  well-formed UTF-8 for messages and UI (one U+FFFD per maximal ill-formed subpart). None throws
+  std::system_error.
+- `dvv/base/utf8_win32.h` (Windows only): `utf8FromWide` (strict) and `wideFromUtf8`.
+- `dvv/base/local_time.h`: `localTime(time_point)` → `std::optional<std::tm>`.
+- `SourceSuffix` and `formatLogRecord(record, SourceSuffix)`; `SplitOpen` and
+  `SplitFileSink::open(folder, prefix, max_bytes, SplitOpen)`.
+- `SplitLogName` (ordered by stamp, then number), `LetterCase` and
+  `parseSplitLogName(name, prefix, letters)`.
+- The package installs `DvvOsSources.cmake` next to `DvvCompilerOptions.cmake`.
+
+### Changed
+- `SplitFileSink::setHeader` takes a `MoveOnlyFunction<std::string(const std::filesystem::path&)>`.
+  Lambdas (also move-only ones), `std::function` objects, function pointers and `nullptr` are
+  accepted. Pass `nullptr` for no header. Behaviour change: an empty `std::function` no longer
+  means "no header"; it throws `std::bad_function_call` at the first header. Thrown from a write on
+  the async logger thread it ends the process.
+- `formatLogRecord(record, {})` and `SplitFileSink::open(…, {})` are now ambiguous; pass the enum.
+- `MoveOnlyFunction` (the polyfill used where the standard library lacks
+  std::move_only_function) has no target when built from a null function pointer, a null member
+  pointer or an empty `MoveOnlyFunction` of another signature, as the standard type does.
+- Requires dvv-build 0.5.0.
+
+### Deprecated (removed in 1.0.0)
+- `formatLogRecord(record, bool)`: use `SourceSuffix`.
+- `SplitFileSink::open(…, bool append_newest)`: use `SplitOpen`.
+- `Errc::ShaderCompile`: no dvv library returns it.
+- `RotatingFileSink`: use `SplitFileSink`.
+
+### Fixed
+- `MemorySink`'s comment no longer names a GUI log panel.
+- A log call (`DVV_LOG_*`, `DVV_LOG_TEXT`, `Logger::write`, `mark`) never throws, so it is safe in
+  destructors and `noexcept` functions. If formatting fails, the line is the format text; if memory
+  runs out, the line is counted as dropped; a sink that throws misses that line. Since 0.3.0 such a
+  call could throw and end the process.
+
 ## [0.4.1] - 2026-11-17
 
 ### Fixed

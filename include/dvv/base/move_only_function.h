@@ -7,6 +7,10 @@
 // volatile or reference-qualified form. It never uses a small buffer: a non-empty function owns
 // one heap block. Calling an empty function asserts in Debug builds, where the standard one is
 // undefined.
+//
+// Empty cases: a null function pointer, a null member pointer or an empty MoveOnlyFunction of
+// another signature makes an empty function; an empty std::function does not (calling it throws
+// std::bad_function_call).
 
 #include <cassert>
 #include <concepts>
@@ -19,6 +23,14 @@
 
 namespace dvv {
 namespace detail {
+
+template <class Signature>
+class MoveOnlyFunction;
+
+template <class T>
+inline constexpr bool IS_MOVE_ONLY_FUNCTION = false;
+template <class S>
+inline constexpr bool IS_MOVE_ONLY_FUNCTION<MoveOnlyFunction<S>> = true;
 
 template <class R, bool Noexcept, class... Args>
 class MoveOnlyFunctionBase {
@@ -33,7 +45,18 @@ public:
                  (!Noexcept || std::is_nothrow_invocable_r_v<R, std::decay_t<F>&, Args...>))
     MoveOnlyFunctionBase(
         F&& target)  // NOLINT(google-explicit-constructor,bugprone-forwarding-reference-overload)
-        : model_(std::make_unique<Model<std::decay_t<F>>>(std::forward<F>(target))) {}
+    {
+        using D = std::decay_t<F>;
+        // A function reference is never null, and testing one would trip -Waddress under -Werror.
+        if constexpr (!std::is_function_v<std::remove_reference_t<F>> &&
+                      ((std::is_pointer_v<D> && std::is_function_v<std::remove_pointer_t<D>>) ||
+                       std::is_member_pointer_v<D> || IS_MOVE_ONLY_FUNCTION<D>)) {
+            if (target == nullptr) {
+                return;  // no target, as std::move_only_function
+            }
+        }
+        model_ = std::make_unique<Model<D>>(std::forward<F>(target));
+    }
 
     MoveOnlyFunctionBase(MoveOnlyFunctionBase&&) noexcept = default;
     MoveOnlyFunctionBase& operator=(MoveOnlyFunctionBase&&) noexcept = default;
@@ -81,9 +104,6 @@ private:
 
     std::unique_ptr<Concept> model_;
 };
-
-template <class Signature>
-class MoveOnlyFunction;
 
 template <class R, class... Args>
 class MoveOnlyFunction<R(Args...)> final : public MoveOnlyFunctionBase<R, false, Args...> {

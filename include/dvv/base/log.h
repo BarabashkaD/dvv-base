@@ -6,14 +6,16 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <optional>
 #include <source_location>
 #include <span>
 #include <string>
@@ -24,6 +26,7 @@
 
 #include "dvv/base/error.h"
 #include "dvv/base/log_encode.h"
+#include "dvv/base/move_only_function.h"
 
 namespace dvv {
 
@@ -41,7 +44,10 @@ struct LogRecord {
 
 // "2026-10-20T12:34:56.789Z INFO  message [file.cpp:42]"
 [[nodiscard]] std::string formatLogRecord(const LogRecord& record);
-// with_source false drops the " [file.cpp:42]" suffix; true is the one-argument form.
+enum class SourceSuffix : std::uint8_t { Without, With };
+// Without drops the " [file.cpp:42]" suffix; With is the one-argument form.
+[[nodiscard]] std::string formatLogRecord(const LogRecord& record, SourceSuffix suffix);
+// Deprecated (CHANGELOG 0.5.0): use the SourceSuffix form. with_source true is With.
 [[nodiscard]] std::string formatLogRecord(const LogRecord& record, bool with_source);
 
 // Sinks are called one at a time: under the logger's lock in synchronous mode, on the log thread in
@@ -82,7 +88,7 @@ private:
 #endif
 };
 
-// Keeps lines in memory; for tests and the GUI log panel.
+// Keeps every line in memory; tests read what was logged through it.
 class MemorySink final : public ILogSink {
 public:
     void write(const LogRecord& record, std::string_view line) override;
@@ -115,6 +121,7 @@ private:
 // the next attempt waits until max_bytes more have been written, and a successful rotation clears
 // this wait. If the file cannot be (re)opened, the lines are dropped and the open is retried on
 // every write.
+// Deprecated (CHANGELOG 0.5.0): use SplitFileSink.
 class RotatingFileSink final : public ILogSink {
 public:
     [[nodiscard]] static Result<std::shared_ptr<RotatingFileSink>> open(std::filesystem::path path,
@@ -140,13 +147,31 @@ private:
     std::uintmax_t next_rotation_at_ = 0;  // no rotation before size_ reaches this
 };
 
+enum class SplitOpen : std::uint8_t { NewFile, AppendNewest };
+
+// A name SplitFileSink writes: stamp is YYYYMMDDHHMMSS as a number, number the -N suffix (1
+// without one). The comparison orders by (stamp, number), which is creation order.
+struct SplitLogName {
+    std::uint64_t stamp = 0;
+    std::uint32_t number = 1;
+    friend constexpr auto operator<=>(const SplitLogName&, const SplitLogName&) = default;
+};
+enum class LetterCase : std::uint8_t { Exact, IgnoreAscii };
+// Parses "<prefix>-YYYYMMDD-HHMMSS.log" or "<prefix>-YYYYMMDD-HHMMSS-N.log" (8 and 6 digits; N 1 to
+// 9 digits, no leading zero). IgnoreAscii compares the prefix and ".log" without ASCII case;
+// SplitFileSink itself always uses Exact.
+[[nodiscard]] std::optional<SplitLogName> parseSplitLogName(
+    std::string_view name, std::string_view prefix,
+    LetterCase letters = LetterCase::Exact) noexcept;
+
 // Writes <folder>/<prefix>-YYYYMMDD-HHMMSS[-N].log, named by the local time of its creation. A
 // file is created exclusively (it never opens an existing one); a taken name moves on to the
 // suffix -2, -3, ... The newest file is found by parsing names strictly as that pattern and
 // comparing (timestamp, N), no suffix counting as 1; a name that does not match is never touched.
 //
-// open(append_newest = true) appends to the newest matching file below max_bytes, else (or when
-// that file cannot be opened for appending) creates a new file; open(false) always creates one.
+// open(..., SplitOpen::AppendNewest) appends to the newest matching file below max_bytes, else (or
+// when that file cannot be opened for appending) creates a new file; SplitOpen::NewFile always
+// creates one.
 // A write that would pass max_bytes starts a new file first, unless the current file holds no line
 // yet (only its header, or nothing), so a line is never divided and a line larger than max_bytes
 // gets a file of its own. Never renames or deletes a file.
@@ -167,6 +192,11 @@ public:
     [[nodiscard]] static Result<std::shared_ptr<SplitFileSink>> open(std::filesystem::path folder,
                                                                      std::string prefix,
                                                                      std::uintmax_t max_bytes,
+                                                                     SplitOpen mode);
+    // Deprecated (CHANGELOG 0.5.0): use the SplitOpen form. append_newest true is AppendNewest.
+    [[nodiscard]] static Result<std::shared_ptr<SplitFileSink>> open(std::filesystem::path folder,
+                                                                     std::string prefix,
+                                                                     std::uintmax_t max_bytes,
                                                                      bool append_newest);
 
     ~SplitFileSink() override;
@@ -180,8 +210,10 @@ public:
     // (without a source location) and flushes. `previous` is the file the new one continues,
     // empty for the file created by open(). Must not log or call back into this sink. If the
     // file created by open() has no line yet, setHeader writes its header at once; an appended
-    // file gets none.
-    void setHeader(std::function<std::string(const std::filesystem::path& previous)> make);
+    // file gets none. Pass nullptr for no header. An empty std::function is not "no header": it is
+    // a callable that throws std::bad_function_call at the first header, from setHeader itself when
+    // the open file has no line yet, else from the write that starts the next file.
+    void setHeader(MoveOnlyFunction<std::string(const std::filesystem::path& previous)> make);
     // The file in use, or the last one if a failure closed it. Thread-safe.
     [[nodiscard]] std::filesystem::path currentFile() const;
     // The sizes of the matching files found by open(), plus every byte written since. Thread-safe.
@@ -222,7 +254,7 @@ private:
     std::uintmax_t offered_ = 0;          // bytes of all lines passed to write()
     std::uintmax_t started_at_ = 0;       // offered_ when the current file was started
     std::uintmax_t next_attempt_at_ = 0;  // no new file before offered_ reaches this
-    std::function<std::string(const std::filesystem::path&)> make_header_;
+    MoveOnlyFunction<std::string(const std::filesystem::path&)> make_header_;
 };
 
 namespace detail {
@@ -314,14 +346,16 @@ public:
     // True when a call at this level can reach a sink: not Off, at or above level() and at or
     // above the lowest sink level. Always false without sinks.
     [[nodiscard]] bool enabled(LogLevel level) const noexcept;
+    // Never throws, as no log call does: if memory runs out, the message is counted as dropped.
     void write(LogLevel level, std::string_view message,
-               std::source_location where = std::source_location::current());
+               std::source_location where = std::source_location::current()) noexcept;
     // Delivers `text` as one record of level Info, flagged as a mark, to every sink whose level is
     // not Off, ignoring the logger's level and the sinks' thresholds. In order with the other
     // records: synchronous, under the same lock; asynchronous, through the queue with the priority
     // of Warn, so a full ring drops it only when it would drop a warning (it is counted as a
     // dropped Info message). Does nothing without sinks. Records the call site like a log macro.
-    void mark(std::string_view text, std::source_location where = std::source_location::current());
+    void mark(std::string_view text,
+              std::source_location where = std::source_location::current()) noexcept;
 
     // Asynchronous mode: starts the log thread "dvv-log"; from now on a call queues its message
     // and returns, and the log thread formats it and calls the sinks. A second call does nothing.
@@ -364,11 +398,11 @@ private:
 
     // The one entry every DVV_LOG call reaches.
     void submit(LogLevel level, const detail::LogSite& site, std::atomic<bool>& bare_warned,
-                const detail::LogPayload& payload);
+                const detail::LogPayload& payload) noexcept;
     // Queues or delivers one message; `site` is null for text with its own location `where`.
     // `flags` are the ring record's flags (log_ring.h): the bare "{}" warning, a mark.
     void route(LogLevel level, const detail::LogSite* site, std::source_location where,
-               const detail::LogPayload& payload, std::uint8_t flags);
+               const detail::LogPayload& payload, std::uint8_t flags) noexcept;
     // The asynchronous path; false when the logger is synchronous (nothing queued).
     bool tryQueue(LogLevel level, const detail::LogSite* site, std::source_location where,
                   const detail::LogPayload& payload, std::uint8_t flags) noexcept;
@@ -377,13 +411,18 @@ private:
                      const detail::LogPayload& payload, std::uint8_t flags) noexcept;
     void wakeLogThread() noexcept;
     void leaveFlight() noexcept;
-    // The synchronous path; false when the logger became asynchronous (nothing delivered).
+    // The synchronous path; false when the logger became asynchronous (nothing delivered). A
+    // message whose formatting fails is its format text; one that runs out of memory is dropped.
     bool deliverNow(LogLevel level, const detail::LogSite* site, std::source_location where,
-                    const detail::LogPayload& payload, std::uint8_t flags);
+                    const detail::LogPayload& payload, std::uint8_t flags) noexcept;
     // Writes one record, then the bare-"{}" warning of `bare_site` if not null, under mutex_;
-    // false when the logger became asynchronous. A mark goes to every sink not at Off.
+    // false when the logger became asynchronous. A mark goes to every sink not at Off. A line that
+    // runs out of memory, or that a sink throws on, is counted as dropped.
     bool deliver(LogLevel level, std::string_view message, std::source_location where,
-                 const detail::LogSite* bare_site, bool mark);
+                 const detail::LogSite* bare_site, bool mark) noexcept;
+    // Writes one record to every sink that takes it; mutex_ held, synchronous mode.
+    void deliverToSinks(const LogRecord& record, std::string_view line) noexcept;
+    void countDropped(LogLevel level) noexcept;
     // Recomputes gate_ and marks_open_; mutex_ held.
     void updateGate() noexcept;
 
@@ -438,15 +477,18 @@ namespace detail {
 
 struct LoggerAccess {
     static void submit(LogLevel level, const LogSite& site, std::atomic<bool>& bare_warned,
-                       const LogPayload& payload) {
+                       const LogPayload& payload) noexcept {
         Logger::instance().submit(level, site, bare_warned, payload);
     }
+    static void countDropped(LogLevel level) noexcept { Logger::instance().countDropped(level); }
 };
 
+// Never throws: if formatting fails the message is its format text; if memory runs out it is
+// counted as dropped.
 template <class... Args>
 void logCall(LogLevel level, const LogSite& site, std::atomic<bool>& bare_warned,
              [[maybe_unused]] std::format_string<std::type_identity_t<Args>...> fmt,
-             const Args&... args) {
+             const Args&... args) noexcept {
     if constexpr (LOG_ALL_DEFERRABLE<Args...>) {
         constexpr std::size_t BUDGET = LOG_MAX_RECORD_BYTES - LOG_RECORD_HEADER_BYTES;
         const auto encode = [&args...](std::byte* out) noexcept {
@@ -463,9 +505,17 @@ void logCall(LogLevel level, const LogSite& site, std::atomic<bool>& bare_warned
         };
         LoggerAccess::submit(level, site, bare_warned, payload);
     } else {
-        const std::string text = std::vformat(fmt.get(), std::make_format_args(args...));
+        std::string text;
         LogPayload payload;
-        payload.text = text;
+        try {
+            text = std::vformat(fmt.get(), std::make_format_args(args...));
+            payload.text = text;
+        } catch (const std::bad_alloc&) {
+            LoggerAccess::countDropped(level);
+            return;
+        } catch (...) {
+            payload.text = fmt.get();  // a formatter failed: the format text, no allocation
+        }
         LoggerAccess::submit(level, site, bare_warned, payload);
     }
 }
