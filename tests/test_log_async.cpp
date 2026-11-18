@@ -520,8 +520,9 @@ TEST_CASE("async: start and stop twice are harmless; addSink while running is ig
 TEST_CASE("async: stop without start still flushes the file sink") {
     const TempDir temp("dvv-base-log-async-stop");
     const AsyncScope scope;
-    const auto path = temp.path() / "stop.log";
-    auto sink = dvv::RotatingFileSink::open(path, 100000, 1).value();
+    auto sink =
+        dvv::SplitFileSink::open(temp.path(), "p", 1000000, dvv::SplitOpen::NewFile).value();
+    const auto path = sink->currentFile();
     logger().addSink(sink);
     DVV_LOG_INFO("buffered until stop");
     logger().stop();
@@ -669,8 +670,9 @@ TEST_CASE("async: a text message over the record limit is cut and still appears"
 TEST_CASE("async: the file sink has the lines on disk after a pass without flush") {
     const TempDir temp("dvv-base-log-async-pass");
     const AsyncScope scope;
-    const auto path = temp.path() / "pass.log";
-    auto file = dvv::RotatingFileSink::open(path, 1000000, 1).value();
+    auto file =
+        dvv::SplitFileSink::open(temp.path(), "p", 1000000, dvv::SplitOpen::NewFile).value();
+    const auto path = file->currentFile();
     auto waiting = std::make_shared<WaitingSink>();
     logger().addSink(file);
     logger().addSink(waiting);

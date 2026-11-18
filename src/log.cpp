@@ -90,10 +90,14 @@ std::string formatLogRecord(const LogRecord& record) {
     return line;
 }
 
-std::string formatLogRecord(const LogRecord& record, bool with_source) {
+std::string formatLogRecord(const LogRecord& record, SourceSuffix suffix) {
     std::string line;
-    appendLogLine(record, line, with_source);
+    appendLogLine(record, line, suffix == SourceSuffix::With);
     return line;
+}
+
+std::string formatLogRecord(const LogRecord& record, bool with_source) {
+    return formatLogRecord(record, with_source ? SourceSuffix::With : SourceSuffix::Without);
 }
 
 void StderrSink::write(const LogRecord& /*record*/, std::string_view line) {
@@ -369,7 +373,7 @@ void Logger::updateGate() noexcept {
     marks_open_.store(lowest != LogLevel::Off, std::memory_order_relaxed);
 }
 
-void Logger::write(LogLevel level, std::string_view message, std::source_location where) {
+void Logger::write(LogLevel level, std::string_view message, std::source_location where) noexcept {
     if (!enabled(level)) {
         return;
     }
@@ -378,7 +382,7 @@ void Logger::write(LogLevel level, std::string_view message, std::source_locatio
     route(level, nullptr, where, payload, 0);
 }
 
-void Logger::mark(std::string_view text, std::source_location where) {
+void Logger::mark(std::string_view text, std::source_location where) noexcept {
     // Not enabled(): a mark ignores the logger's level and the sinks' thresholds.
     if (!marks_open_.load(std::memory_order_relaxed)) {
         return;
@@ -389,14 +393,14 @@ void Logger::mark(std::string_view text, std::source_location where) {
 }
 
 void Logger::submit(LogLevel level, const detail::LogSite& site, std::atomic<bool>& bare_warned,
-                    const detail::LogPayload& payload) {
+                    const detail::LogPayload& payload) noexcept {
     const bool warn_bare =
         site.bareBraces && !bare_warned.exchange(true, std::memory_order_relaxed);
     route(level, &site, site.where, payload, warn_bare ? detail::LOG_RECORD_WARN_BARE : 0);
 }
 
 void Logger::route(LogLevel level, const detail::LogSite* site, std::source_location where,
-                   const detail::LogPayload& payload, std::uint8_t flags) {
+                   const detail::LogPayload& payload, std::uint8_t flags) noexcept {
     // start() and stop() switch the mode under mutex_; each path re-checks it and hands over to
     // the other when it changed meanwhile.
     for (;;) {
@@ -505,7 +509,7 @@ void Logger::leaveFlight() noexcept {
 }
 
 bool Logger::deliverNow(LogLevel level, const detail::LogSite* site, std::source_location where,
-                        const detail::LogPayload& payload, std::uint8_t flags) {
+                        const detail::LogPayload& payload, std::uint8_t flags) noexcept {
     const detail::LogSite* bare_site = (flags & detail::LOG_RECORD_WARN_BARE) != 0 ? site : nullptr;
     const bool mark = (flags & detail::LOG_RECORD_MARK) != 0;
     if (payload.format == nullptr) {
@@ -513,41 +517,96 @@ bool Logger::deliverNow(LogLevel level, const detail::LogSite* site, std::source
     }
     // Never the ring: a per-thread scratch buffer sized from the encoder's own result.
     thread_local std::vector<std::byte> scratch;
-    scratch.resize(payload.size);
-    payload.encode(scratch.data(), payload.context);
     std::string text;
-    payload.format(scratch.data(), site->format, text);
+    try {
+        scratch.resize(payload.size);
+        payload.encode(scratch.data(), payload.context);
+        payload.format(scratch.data(), site->format, text);
+    } catch (const std::bad_alloc&) {
+        countDropped(level);  // out of memory: the message is lost and counted
+        if (bare_site != nullptr) {
+            countDropped(LogLevel::Warn);  // and so is its bare-"{}" warning
+        }
+        return true;
+    } catch (...) {
+        return deliver(level, site->format, where, bare_site, mark);  // the format text
+    }
     return deliver(level, text, where, bare_site, mark);
 }
 
 bool Logger::deliver(LogLevel level, std::string_view message, std::source_location where,
-                     const detail::LogSite* bare_site, bool mark) {
+                     const detail::LogSite* bare_site, bool mark) noexcept {
     const LogRecord record{level, message, where, std::chrono::system_clock::now(), mark};
-    const std::string line = formatLogRecord(record);
-    std::string warning_text;
-    if (bare_site != nullptr) {
-        warning_text = bareWarningText(*bare_site);
+    std::string line;
+    bool has_line = true;
+    try {
+        line = formatLogRecord(record);
+    } catch (...) {
+        has_line = false;  // out of memory: counted once the mode is known
     }
-    const LogRecord warning{LogLevel::Warn, warning_text,
-                            bare_site != nullptr ? bare_site->where : where, record.time};
-    const std::string warning_line = bare_site != nullptr ? formatLogRecord(warning) : "";
-    const std::lock_guard lock(mutex_);
+    std::string warning_text;
+    std::string warning_line;
+    LogRecord warning{
+        LogLevel::Warn, {}, bare_site != nullptr ? bare_site->where : where, record.time};
+    bool has_warning = bare_site != nullptr;
+    if (has_warning) {
+        try {
+            warning_text = bareWarningText(*bare_site);
+            warning.message = warning_text;
+            warning_line = formatLogRecord(warning);
+        } catch (...) {
+            has_warning = false;  // out of memory: counted once the mode is known
+        }
+    }
+    std::unique_lock lock(mutex_, std::defer_lock);
+    try {
+        lock.lock();
+    } catch (...) {
+        // std::mutex::lock reports a system error by throwing: the lines are lost and counted.
+        countDropped(level);
+        if (bare_site != nullptr) {
+            countDropped(LogLevel::Warn);
+        }
+        return true;
+    }
     if (async_.load(std::memory_order_relaxed)) {
         return false;  // start() switched the mode meanwhile: the log thread owns the sinks
     }
-    for (const auto& entry : sinks_) {
-        if (sinkTakes(level, mark, entry->level.load(std::memory_order_relaxed))) {
-            entry->sink->write(record, line);
-        }
+    if (has_line) {
+        deliverToSinks(record, line);
+    } else {
+        countDropped(level);
     }
-    if (bare_site != nullptr) {
-        for (const auto& entry : sinks_) {
-            if (LogLevel::Warn >= entry->level.load(std::memory_order_relaxed)) {
-                entry->sink->write(warning, warning_line);
-            }
-        }
+    if (has_warning) {
+        deliverToSinks(warning, warning_line);
+    } else if (bare_site != nullptr) {
+        countDropped(LogLevel::Warn);
     }
     return true;
+}
+
+void Logger::deliverToSinks(const LogRecord& record, std::string_view line) noexcept {
+    bool taken = false;
+    bool lost = false;
+    for (const auto& entry : sinks_) {
+        if (!sinkTakes(record.level, record.mark, entry->level.load(std::memory_order_relaxed))) {
+            continue;
+        }
+        try {
+            entry->sink->write(record, line);
+            taken = true;
+        } catch (...) {
+            lost = true;  // the line is lost to this sink only
+        }
+    }
+    if (lost && !taken) {
+        // No log thread reports a sink's failure here: a line no sink took is counted once.
+        countDropped(record.level);
+    }
+}
+
+void Logger::countDropped(LogLevel level) noexcept {
+    dropped_[levelIndex(level)].fetch_add(1, std::memory_order_relaxed);
 }
 
 void Logger::start() {
@@ -730,9 +789,17 @@ void Logger::handleRecord(const std::byte* payload, std::uint32_t size) noexcept
                 message = {reinterpret_cast<const char*>(body), header.textSize};
             }
             emitLine(header.level, message, where, time, mark);
-        } catch (...) {
-            // Formatting failed (out of memory): the message is lost and counted.
+        } catch (const std::bad_alloc&) {
+            // Out of memory: the message is lost and counted.
             dropped_[levelIndex(header.level)].fetch_add(1, std::memory_order_relaxed);
+        } catch (...) {
+            // Formatting failed (for example a negative dynamic width): the format text, as the
+            // synchronous mode gives. Only an Arguments record formats, and it has a site.
+            if (site != nullptr) {
+                emitLine(header.level, site->format, where, time, mark);
+            } else {
+                dropped_[levelIndex(header.level)].fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
     if ((header.flags & detail::LOG_RECORD_WARN_BARE) != 0 && site != nullptr) {

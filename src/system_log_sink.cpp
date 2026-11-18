@@ -10,6 +10,8 @@
 // clang-format off
 #include <windows.h>
 // clang-format on
+
+#include "dvv/base/utf8_win32.h"
 #elif defined(__APPLE__)
 #include <os/log.h>
 #else
@@ -48,21 +50,7 @@ SystemLogSink::~SystemLogSink() {
 
 // OutputDebugStringW has no levels: a mark is written like any line.
 void SystemLogSink::write(const LogRecord& /*record*/, std::string_view line) {
-    if (line.size() > static_cast<std::size_t>(INT_MAX)) {
-        return;
-    }
-    std::wstring wide;
-    if (!line.empty()) {
-        const int length = static_cast<int>(line.size());
-        const int size = MultiByteToWideChar(CP_UTF8, 0, line.data(), length, nullptr, 0);
-        if (size <= 0) {
-            return;
-        }
-        wide.assign(static_cast<std::size_t>(size), L'\0');
-        if (MultiByteToWideChar(CP_UTF8, 0, line.data(), length, wide.data(), size) != size) {
-            return;
-        }
-    }
+    std::wstring wide = wideFromUtf8(line);
     wide.push_back(L'\n');
     OutputDebugStringW(wide.c_str());
 }

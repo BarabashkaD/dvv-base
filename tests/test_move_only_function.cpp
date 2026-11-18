@@ -152,3 +152,48 @@ TEST_CASE(
     static_assert(!std::is_constructible_v<Function, int>);
     static_assert(std::is_constructible_v<Function, int (*)(int)>);
 }
+
+TEST_CASE_TEMPLATE("a null function pointer makes an empty function", F,
+                   dvv::detail::MoveOnlyFunction<int()>, dvv::MoveOnlyFunction<int()>) {
+    int (*pointer)() = nullptr;
+    F function(pointer);
+    CHECK(function == nullptr);
+    CHECK_FALSE(function);
+}
+
+namespace {
+struct Member {
+    int get() { return 1; }
+};
+}  // namespace
+
+TEST_CASE_TEMPLATE("a null member pointer makes an empty function", F,
+                   dvv::detail::MoveOnlyFunction<int(Member&)>,
+                   dvv::MoveOnlyFunction<int(Member&)>) {
+    int (Member::*member)() = nullptr;
+    F empty(member);
+    CHECK(empty == nullptr);
+    F full(&Member::get);
+    Member object;
+    REQUIRE(full != nullptr);
+    CHECK(full(object) == 1);
+}
+
+TEST_CASE("an empty function of another signature makes an empty function") {
+    SUBCASE("dvv::detail::MoveOnlyFunction") {
+        dvv::detail::MoveOnlyFunction<int() noexcept> empty;
+        dvv::detail::MoveOnlyFunction<int()> function(std::move(empty));
+        CHECK(function == nullptr);
+    }
+    SUBCASE("dvv::MoveOnlyFunction") {
+        dvv::MoveOnlyFunction<int() noexcept> empty;
+        dvv::MoveOnlyFunction<int()> function(std::move(empty));
+        CHECK(function == nullptr);
+    }
+    SUBCASE("a full function of another signature stays full") {
+        dvv::detail::MoveOnlyFunction<int() noexcept> full([]() noexcept { return 4; });
+        dvv::detail::MoveOnlyFunction<int()> function(std::move(full));
+        REQUIRE(function != nullptr);
+        CHECK(function() == 4);
+    }
+}

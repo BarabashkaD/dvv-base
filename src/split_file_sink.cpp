@@ -6,20 +6,16 @@
 #include <optional>
 #include <source_location>
 #include <system_error>
-#include <tuple>
 #include <utility>
 
+#include "dvv/base/local_time.h"
 #include "dvv/base/log.h"
+#include "dvv/base/utf8.h"
 #include "split_file_sink_detail.h"
-#include "utf8_path.h"
 
 namespace dvv {
 
-namespace detail {
-
 namespace {
-
-std::atomic<SplitFileClock> split_file_clock{nullptr};
 
 constexpr std::string_view EXTENSION = ".log";
 // "-YYYYMMDD-HHMMSS"
@@ -38,25 +34,44 @@ std::uint64_t digitsValue(std::string_view text) noexcept {
     return value;
 }
 
+char asciiLower(char c) noexcept {
+    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+// text[pos, pos + count), unchecked; substr would be a throwing path in a noexcept parser.
+std::string_view slice(std::string_view text, std::size_t pos, std::size_t count) noexcept {
+    return {text.data() + pos, count};
+}
+
+bool sameText(std::string_view a, std::string_view b, LetterCase letters) noexcept {
+    if (letters == LetterCase::Exact) {
+        return a == b;
+    }
+    return std::ranges::equal(a, b, [](char x, char y) { return asciiLower(x) == asciiLower(y); });
+}
+
 }  // namespace
 
-std::optional<SplitLogName> parseSplitLogName(std::string_view name, std::string_view prefix) {
+std::optional<SplitLogName> parseSplitLogName(std::string_view name, std::string_view prefix,
+                                              LetterCase letters) noexcept {
     if (prefix.empty() || name.size() < prefix.size() + STAMP_CHARS + EXTENSION.size() ||
-        !name.starts_with(prefix) || !name.ends_with(EXTENSION)) {
+        !sameText(slice(name, 0, prefix.size()), prefix, letters) ||
+        !sameText(slice(name, name.size() - EXTENSION.size(), EXTENSION.size()), EXTENSION,
+                  letters)) {
         return std::nullopt;
     }
     const std::string_view rest =
-        name.substr(prefix.size(), name.size() - prefix.size() - EXTENSION.size());
-    const std::string_view date = rest.substr(1, 8);
-    const std::string_view time = rest.substr(10, 6);
+        slice(name, prefix.size(), name.size() - prefix.size() - EXTENSION.size());
+    const std::string_view date = slice(rest, 1, 8);
+    const std::string_view time = slice(rest, 10, 6);
     if (rest[0] != '-' || rest[9] != '-' || !allDigits(date) || !allDigits(time)) {
         return std::nullopt;
     }
     SplitLogName parsed;
     parsed.stamp = digitsValue(date) * 1'000'000U + digitsValue(time);
-    const std::string_view suffix = rest.substr(STAMP_CHARS);
+    const std::string_view suffix = slice(rest, STAMP_CHARS, rest.size() - STAMP_CHARS);
     if (!suffix.empty()) {
-        const std::string_view number = suffix.substr(1);
+        const std::string_view number = slice(suffix, 1, suffix.size() - 1);
         if (suffix[0] != '-' || number.empty() || number.size() > MAX_SUFFIX_DIGITS ||
             number[0] == '0' || !allDigits(number)) {
             return std::nullopt;
@@ -66,21 +81,24 @@ std::optional<SplitLogName> parseSplitLogName(std::string_view name, std::string
     return parsed;
 }
 
+namespace detail {
+
+namespace {
+
+std::atomic<SplitFileClock> split_file_clock{nullptr};
+
+}  // namespace
+
 std::string splitLogFileStem(std::string_view prefix, std::chrono::system_clock::time_point time) {
-    const std::time_t seconds = std::chrono::system_clock::to_time_t(time);
-    std::tm local{};
-#if defined(_WIN32)
-    const bool converted = localtime_s(&local, &seconds) == 0;
-#else
-    const bool converted = localtime_r(&seconds, &local) != nullptr;
-#endif
-    if (!converted) {
+    const std::optional<std::tm> local = localTime(time);
+    if (!local) {
         // Outside the platform's local time range: UTC rather than no name.
         return std::format("{}-{:%Y%m%d-%H%M%S}", prefix,
                            std::chrono::floor<std::chrono::seconds>(time));
     }
-    return std::format("{}-{:04}{:02}{:02}-{:02}{:02}{:02}", prefix, local.tm_year + 1900,
-                       local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
+    return std::format("{}-{:04}{:02}{:02}-{:02}{:02}{:02}", prefix, local->tm_year + 1900,
+                       local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min,
+                       local->tm_sec);
 }
 
 void setSplitFileClock(SplitFileClock clock) noexcept {
@@ -93,9 +111,6 @@ namespace {
 
 // A clash moves on to the next suffix at most this far.
 constexpr std::uint32_t MAX_SUFFIX = 1000;
-
-using detail::pathFromUtf8;
-using detail::utf8;
 
 // A failure note: stderr only, never the Logger (the sink runs under its lock).
 void note(std::string_view text) {
@@ -119,7 +134,7 @@ std::optional<CreatedFile> createExclusive(const std::filesystem::path& folder,
     for (std::uint32_t number = 1; number <= MAX_SUFFIX; ++number) {
         const std::string name =
             number == 1 ? std::format("{}.log", stem) : std::format("{}-{}.log", stem, number);
-        CreatedFile created{.path = folder / pathFromUtf8(name), .stream = {}};
+        CreatedFile created{.path = folder / pathFromText(name), .stream = {}};
         created.stream.open(created.path, std::ios::binary | std::ios::out | std::ios::noreplace);
         if (created.stream.is_open()) {
             return created;
@@ -140,33 +155,28 @@ std::optional<CreatedFile> createExclusive(const std::filesystem::path& folder,
 Result<std::shared_ptr<SplitFileSink>> SplitFileSink::open(std::filesystem::path folder,
                                                            std::string prefix,
                                                            std::uintmax_t max_bytes,
-                                                           bool append_newest) {
+                                                           SplitOpen mode) {
     if (max_bytes == 0 || prefix.empty()) {
         return makeError(Errc::Internal, "split log needs max_bytes > 0 and a prefix");
     }
     std::error_code error;
     std::filesystem::create_directories(folder, error);
     if (error) {
-        return makeError(Errc::Io, std::format("cannot create log folder '{}': {}", utf8(folder),
-                                               error.message()));
+        return makeError(Errc::Io, std::format("cannot create log folder '{}': {}",
+                                               pathDisplayText(folder), error.message()));
     }
     std::shared_ptr<SplitFileSink> sink(
         new SplitFileSink(std::move(folder), std::move(prefix), max_bytes));
     // No other thread has the sink yet: its state is set here without the mutex.
 
     // The matching files: their total size and the newest by (timestamp, N).
-    std::optional<detail::SplitLogName> newest_name;
+    std::optional<SplitLogName> newest_name;
     std::filesystem::path newest;
     std::uintmax_t newest_size = 0;
     std::filesystem::directory_iterator entry(sink->folder_, error);
     for (; !error && entry != std::filesystem::directory_iterator(); entry.increment(error)) {
-        std::string file_name;
-        try {
-            file_name = utf8(entry->path().filename());
-        } catch (const std::system_error&) {
-            continue;  // a name that is not valid text (Windows): never ours
-        }
-        const auto name = detail::parseSplitLogName(file_name, sink->prefix_);
+        const std::string file_name = pathText(entry->path().filename());
+        const auto name = parseSplitLogName(file_name, sink->prefix_);
         std::error_code entry_error;
         if (!name || !entry->is_regular_file(entry_error)) {
             continue;
@@ -176,15 +186,14 @@ Result<std::shared_ptr<SplitFileSink>> SplitFileSink::open(std::filesystem::path
             continue;
         }
         sink->total_ += size;
-        if (!newest_name || std::tie(name->stamp, name->number) >
-                                std::tie(newest_name->stamp, newest_name->number)) {
+        if (!newest_name || *name > *newest_name) {
             newest_name = name;
             newest = entry->path();
             newest_size = size;
         }
     }
 
-    if (append_newest && newest_name && newest_size < max_bytes) {
+    if (mode == SplitOpen::AppendNewest && newest_name && newest_size < max_bytes) {
         sink->stream_.open(newest, std::ios::binary | std::ios::app);
         if (sink->stream_.is_open()) {
             sink->current_ = std::move(newest);
@@ -193,17 +202,26 @@ Result<std::shared_ptr<SplitFileSink>> SplitFileSink::open(std::filesystem::path
             return sink;
         }
         sink->stream_.clear();
-        note(std::format("dvv: cannot append to log file '{}'; starting a new one", utf8(newest)));
+        note(std::format("dvv: cannot append to log file '{}'; starting a new one",
+                         pathDisplayText(newest)));
     }
     auto created = createExclusive(sink->folder_, sink->prefix_);
     if (!created) {
-        return makeError(Errc::Io,
-                         std::format("cannot create a log file in '{}'", utf8(sink->folder_)));
+        return makeError(Errc::Io, std::format("cannot create a log file in '{}'",
+                                               pathDisplayText(sink->folder_)));
     }
     sink->stream_ = std::move(created->stream);
     sink->current_ = std::move(created->path);
     sink->header_pending_ = true;
     return sink;
+}
+
+Result<std::shared_ptr<SplitFileSink>> SplitFileSink::open(std::filesystem::path folder,
+                                                           std::string prefix,
+                                                           std::uintmax_t max_bytes,
+                                                           bool append_newest) {
+    return open(std::move(folder), std::move(prefix), max_bytes,
+                append_newest ? SplitOpen::AppendNewest : SplitOpen::NewFile);
 }
 
 SplitFileSink::SplitFileSink(std::filesystem::path folder, std::string prefix,
@@ -212,7 +230,7 @@ SplitFileSink::SplitFileSink(std::filesystem::path folder, std::string prefix,
 
 SplitFileSink::~SplitFileSink() = default;
 
-void SplitFileSink::setHeader(std::function<std::string(const std::filesystem::path&)> make) {
+void SplitFileSink::setHeader(MoveOnlyFunction<std::string(const std::filesystem::path&)> make) {
     const std::lock_guard lock(mutex_);
     make_header_ = std::move(make);
     if (header_pending_ && make_header_ && stream_.is_open()) {
@@ -274,9 +292,9 @@ bool SplitFileSink::startFile() {
         next_attempt_at_ = offered_ + backoff();
         note(stream_.is_open()
                  ? std::format("dvv: cannot create a log file in '{}'; still writing '{}'",
-                               utf8(folder_), utf8(current_))
+                               pathDisplayText(folder_), pathDisplayText(current_))
                  : std::format("dvv: cannot create a log file in '{}'; lines are dropped",
-                               utf8(folder_)));
+                               pathDisplayText(folder_)));
         return false;
     }
     const std::filesystem::path previous = std::move(current_);
@@ -284,7 +302,8 @@ bool SplitFileSink::startFile() {
     // back-off stays as it is.
     stream_.flush();
     if (!stream_.good()) {
-        note(std::format("dvv: writing log file '{}' failed; the file is closed", utf8(previous)));
+        note(std::format("dvv: writing log file '{}' failed; the file is closed",
+                         pathDisplayText(previous)));
     }
     stream_.close();
     stream_ = std::move(created->stream);
@@ -307,7 +326,7 @@ bool SplitFileSink::writeHeader(const std::filesystem::path& previous) {
     record.message = message;
     record.where = std::source_location::current();
     record.time = std::chrono::system_clock::now();
-    return writeLine(formatLogRecord(record, false), true);
+    return writeLine(formatLogRecord(record, SourceSuffix::Without), true);
 }
 
 bool SplitFileSink::writeLine(std::string_view line, bool flush_now) {
@@ -335,7 +354,8 @@ void SplitFileSink::flushStream() {
 }
 
 void SplitFileSink::failFile() {
-    note(std::format("dvv: writing log file '{}' failed; the file is closed", utf8(current_)));
+    note(std::format("dvv: writing log file '{}' failed; the file is closed",
+                     pathDisplayText(current_)));
     stream_.close();
     stream_.clear();
     next_attempt_at_ = std::max(next_attempt_at_, started_at_ + backoff());

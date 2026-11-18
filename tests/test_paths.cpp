@@ -11,12 +11,11 @@
 
 #include "dvv/base/environment.h"
 #include "dvv/base/paths.h"
+#include "dvv/base/utf8.h"
 #include "paths_rules.h"
-#include "utf8_path.h"
 
 namespace {
 
-using dvv::detail::utf8;
 using dvv::paths::detail::DirRule;
 using dvv::paths::detail::DirSource;
 using dvv::paths::detail::resolveDir;
@@ -63,12 +62,12 @@ std::filesystem::path ruleRoot() {
 
 // UTF-8 text of <ruleRoot>/<name>, as a variable's value.
 std::string rootValue(std::string_view name) {
-    return utf8(ruleRoot() / name);
+    return dvv::pathText(ruleRoot() / name);
 }
 
 // Paths are compared as UTF-8 text: on Windows doctest would stream a path through the ANSI code
 // page and throw on a failing check whose path that code page cannot show.
-#define CHECK_SAME_PATH(actual, expected) CHECK(utf8(actual) == utf8(expected))
+#define CHECK_SAME_PATH(actual, expected) CHECK(dvv::pathText(actual) == dvv::pathText(expected))
 
 // resolveDir of the rule {sources, tail} and `app` in the fake environment `environment`.
 dvv::Result<std::filesystem::path> resolveIn(FakeEnvironment environment,
@@ -136,8 +135,8 @@ TEST_CASE("user data and cache directories are absolute and end in the app name"
     CHECK_SAME_PATH(data.filename(), "rawreel");
     const auto cache = dvv::paths::userCacheDir("rawreel").value();
     CHECK(cache.is_absolute());
-    CHECK(utf8(cache).find("rawreel") != std::string::npos);
-    CHECK(utf8(cache) != utf8(data));
+    CHECK(dvv::pathText(cache).find("rawreel") != std::string::npos);
+    CHECK(dvv::pathText(cache) != dvv::pathText(data));
 }
 
 TEST_CASE("app names must be plain directory names") {
@@ -151,7 +150,7 @@ TEST_CASE("app names must be plain directory names") {
 }
 
 TEST_CASE("app names must be valid UTF-8") {
-    // A lone continuation byte; on Windows path(u8string) would throw on it.
+    // A lone continuation byte: not valid UTF-8, so not an app name on any OS.
     const auto data = dvv::paths::userDataDir("app\x80");
     REQUIRE_FALSE(data.has_value());
     CHECK(data.error().code == dvv::Errc::Internal);
@@ -259,9 +258,9 @@ TEST_CASE("Windows directories honour APPDATA and LOCALAPPDATA when absolute") {
     const auto local = std::filesystem::temp_directory_path() / u8"dvv-base-local-äö-データ";
     const auto profile = std::filesystem::temp_directory_path() / u8"dvv-base-profile-äö-データ";
     ScopedEnvironment environment;
-    environment.set("APPDATA", utf8(roaming));
-    environment.set("LOCALAPPDATA", utf8(local));
-    environment.set("USERPROFILE", utf8(profile));
+    environment.set("APPDATA", dvv::pathText(roaming));
+    environment.set("LOCALAPPDATA", dvv::pathText(local));
+    environment.set("USERPROFILE", dvv::pathText(profile));
     CHECK_SAME_PATH(dvv::paths::userDataDir("rawreel").value(), roaming / "rawreel");
     CHECK_SAME_PATH(dvv::paths::userCacheDir("rawreel").value(), local / "rawreel" / "cache");
 }
@@ -271,7 +270,7 @@ TEST_CASE("Windows directories fall back to USERPROFILE\\AppData") {
     const auto data = profile / "AppData" / "Roaming" / "rawreel";
     const auto cache = profile / "AppData" / "Local" / "rawreel" / "cache";
     ScopedEnvironment environment;
-    environment.set("USERPROFILE", utf8(profile));
+    environment.set("USERPROFILE", dvv::pathText(profile));
     environment.set("APPDATA", "");
     environment.set("LOCALAPPDATA", "");
     CHECK_SAME_PATH(dvv::paths::userDataDir("rawreel").value(), data);
@@ -320,7 +319,7 @@ TEST_CASE("executable path exists") {
 #if defined(__APPLE__)
     std::error_code error;
     CHECK_SAME_PATH(path, std::filesystem::canonical(path, error));
-    CHECK(utf8(path.filename()).find("test") != std::string::npos);
+    CHECK(dvv::pathText(path.filename()).find("test") != std::string::npos);
 #endif
 }
 

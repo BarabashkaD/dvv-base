@@ -100,6 +100,20 @@ TEST_CASE("log lines carry time, level, message and file name") {
     CHECK(lines[0].find("Z INFO  opened 3 frames [test_log.cpp:") != std::string::npos);
 }
 
+TEST_CASE("formatLogRecord: SourceSuffix::With equals the one-argument form") {
+    const dvv::LogRecord record{dvv::LogLevel::Warn, "hello world", std::source_location::current(),
+                                std::chrono::system_clock::now()};
+    CHECK(dvv::formatLogRecord(record, dvv::SourceSuffix::With) == dvv::formatLogRecord(record));
+}
+
+TEST_CASE("formatLogRecord: SourceSuffix::Without drops the location") {
+    const dvv::LogRecord record{dvv::LogLevel::Warn, "hello world", std::source_location::current(),
+                                std::chrono::system_clock::now()};
+    const std::string without = dvv::formatLogRecord(record, dvv::SourceSuffix::Without);
+    CHECK(without == dvv::formatLogRecord(record, false));
+    CHECK(without.find(" [") == std::string::npos);
+}
+
 TEST_CASE("formatLogRecord without source drops the location") {
     const dvv::LogRecord record{dvv::LogLevel::Warn, "hello world", std::source_location::current(),
                                 std::chrono::system_clock::now()};
@@ -331,8 +345,9 @@ TEST_CASE("a warning is on disk without calling flush") {
 TEST_CASE("the leak check flushes buffered lines to disk") {
     const TempDir temp("dvv-base-log-leak-check");
     LoggerScope scope;
-    const auto path = temp.path() / "exit.log";
-    auto sink = dvv::RotatingFileSink::open(path, 100000, 1).value();
+    auto sink =
+        dvv::SplitFileSink::open(temp.path(), "p", 1000000, dvv::SplitOpen::NewFile).value();
+    const auto path = sink->currentFile();
     dvv::Logger::instance().addSink(sink);
     DVV_LOG_INFO("last words");
     CHECK(dvv::finishWithLeakCheck(0, dvv::LeakPolicy::Warn) == 0);

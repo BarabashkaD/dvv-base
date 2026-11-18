@@ -9,7 +9,7 @@ find_dependency(Threads)
 find_dependency(nlohmann_json 3.12)
 
 include("${CMAKE_CURRENT_LIST_DIR}/dvv_baseTargets.cmake")
-# Shared CMake modules: include("${DVV_CMAKE_DIR}/DvvCompilerOptions.cmake").
+# Shared CMake modules: include("${DVV_CMAKE_DIR}/DvvCompilerOptions.cmake") and DvvOsSources.cmake.
 set(DVV_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 check_required_components(dvv_base)

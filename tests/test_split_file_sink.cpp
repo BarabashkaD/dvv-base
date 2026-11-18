@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <random>
@@ -18,8 +19,8 @@
 #include <vector>
 
 #include "dvv/base/log.h"
+#include "dvv/base/utf8.h"
 #include "split_file_sink_detail.h"
-#include "utf8_path.h"
 
 #if !defined(_WIN32)
 #include <csignal>
@@ -90,7 +91,7 @@ void writeFile(const std::filesystem::path& file, const std::string& content) {
 }
 
 std::string utf8Name(const std::filesystem::path& file) {
-    return dvv::detail::utf8(file.filename());
+    return dvv::pathText(file.filename());
 }
 
 // The names of the regular files in `folder`, sorted.
@@ -140,7 +141,7 @@ std::vector<std::string> linesOf(const std::string& text) {
 TEST_CASE("split sink: names a new file by local creation time") {
     const TempDir temp("dvv-base-split-name");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true);
+        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest);
         REQUIRE(sink.has_value());
         const auto names = fileNames(temp.path());
         REQUIRE(names.size() == 1);
@@ -155,7 +156,7 @@ TEST_CASE("split sink: the name is the local time of the clock") {
     const FixedClock clock;
     const std::string stem = dvv::detail::splitLogFileStem("p", FixedClock::now());
     CHECK(std::regex_match(stem, std::regex(R"(^p-\d{8}-\d{6}$)")));
-    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
     CHECK(utf8Name(sink->currentFile()) == stem + ".log");
 }
 
@@ -166,7 +167,8 @@ TEST_CASE("split sink: exclusive creation skips a taken name") {
     writeFile(temp.path() / (stem + ".log"), "taken 1\n");
     writeFile(temp.path() / (stem + "-2.log"), "taken 2\n");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
         CHECK(utf8Name(sink->currentFile()) == stem + "-3.log");
         writeLine(*sink, "mine");
     }
@@ -179,8 +181,8 @@ TEST_CASE("split sink: a clash in the same second gets the next suffix") {
     const TempDir temp("dvv-base-split-clash");
     const FixedClock clock;
     const std::string stem = dvv::detail::splitLogFileStem("p", FixedClock::now());
-    auto first = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
-    auto second = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+    auto first = dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
+    auto second = dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
     CHECK(utf8Name(first->currentFile()) == stem + ".log");
     CHECK(utf8Name(second->currentFile()) == stem + "-2.log");
 }
@@ -190,7 +192,8 @@ TEST_CASE("split sink: appends to the newest file under the limit") {
     writeFile(temp.path() / "p-20260101-000000.log", "012345678\n");
     writeFile(temp.path() / "p-20260102-000000.log", "abcdefghi\n");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest).value();
         CHECK(sink->currentFile() == temp.path() / "p-20260102-000000.log");
         writeLine(*sink, "appended");
     }
@@ -203,7 +206,8 @@ TEST_CASE("split sink: a newest file at the limit is not appended to") {
     const TempDir temp("dvv-base-split-full");
     writeFile(temp.path() / "p-20260102-000000.log", "abcdefghi\n");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 10, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 10, dvv::SplitOpen::AppendNewest).value();
         CHECK(sink->currentFile() != temp.path() / "p-20260102-000000.log");
         writeLine(*sink, "new");
     }
@@ -217,7 +221,8 @@ TEST_CASE("split sink: newest order with suffixes") {
     writeFile(temp.path() / "p-20260101-000000-2.log", "b\n");
     writeFile(temp.path() / "p-20260101-000000-10.log", "c\n");
     writeFile(temp.path() / "p-20251231-235959-99.log", "d\n");
-    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+    auto sink =
+        dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest).value();
     CHECK(sink->currentFile() == temp.path() / "p-20260101-000000-10.log");
 }
 
@@ -225,40 +230,75 @@ TEST_CASE("split sink: no suffix counts as 1, below -2") {
     const TempDir temp("dvv-base-split-order2");
     writeFile(temp.path() / "p-20260101-000000-2.log", "b\n");
     writeFile(temp.path() / "p-20260101-000000.log", "a\n");
-    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+    auto sink =
+        dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest).value();
     CHECK(sink->currentFile() == temp.path() / "p-20260101-000000-2.log");
 }
 
 TEST_CASE("split sink: strict name parsing") {
-    using dvv::detail::parseSplitLogName;
-    const auto plain = parseSplitLogName("p-20261110-153126.log", "p");
+    const auto plain = dvv::parseSplitLogName("p-20261110-153126.log", "p");
     REQUIRE(plain.has_value());
     if (plain) {  // a guard clang-tidy's unchecked-optional-access check understands
         CHECK(plain->stamp == 20261110153126U);
         CHECK(plain->number == 1U);
     }
-    const auto suffixed = parseSplitLogName("p-20261110-153126-12.log", "p");
+    const auto suffixed = dvv::parseSplitLogName("p-20261110-153126-12.log", "p");
     REQUIRE(suffixed.has_value());
     if (suffixed) {
         CHECK(suffixed->number == 12U);
     }
-    CHECK(parseSplitLogName("rawreel-20261110-153126.log", "rawreel").has_value());
+    CHECK(dvv::parseSplitLogName("rawreel-20261110-153126.log", "rawreel").has_value());
 
-    CHECK_FALSE(parseSplitLogName("p-old.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-1.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("pp-20261110-153126.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("P-20261110-153126.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126.log.1", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126.LOG", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126-.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126-0.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126-02.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126-x.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-2026111a-153126.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110_153126.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-202611100-153126.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("p-20261110-153126-1234567890.log", "p").has_value());
-    CHECK_FALSE(parseSplitLogName("", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-old.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-1.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("pp-20261110-153126.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("P-20261110-153126.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126.log.1", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126.LOG", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-0.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-02.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-x.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-2026111a-153126.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110_153126.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-202611100-153126.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-1234567890.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("-20261110-153126.log", "").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p-20261110-15312.log", "p").has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p.log", "longprefix").has_value());
+    CHECK(dvv::parseSplitLogName("p-20261110-153126-999999999.log", "p") ==
+          std::optional{dvv::SplitLogName{20261110153126, 999999999}});
+}
+
+TEST_CASE("parseSplitLogName ignores ASCII case when asked") {
+    using dvv::LetterCase;
+    CHECK(dvv::parseSplitLogName("rawreel-20261110-153126.log", "RawReel", LetterCase::IgnoreAscii)
+              .has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("p`-20261110-153126.log", "p@", LetterCase::IgnoreAscii)
+                    .has_value());
+    CHECK(dvv::parseSplitLogName("RAWREEL-20261110-153126.LOG", "rawreel", LetterCase::IgnoreAscii)
+              .has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("RAWREEL-20261110-153126.LOG", "rawreel", LetterCase::Exact)
+                    .has_value());
+    CHECK(dvv::parseSplitLogName("rawreel-20261110-153126-3.Log", "rawreel",
+                                 LetterCase::IgnoreAscii) ==
+          std::optional{dvv::SplitLogName{20261110153126, 3}});
+    for (const LetterCase letters : {LetterCase::Exact, LetterCase::IgnoreAscii}) {
+        CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-02.log", "p", letters).has_value());
+        CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-0.log", "p", letters).has_value());
+        CHECK_FALSE(dvv::parseSplitLogName("p-20261110-153126-x.log", "p", letters).has_value());
+        CHECK_FALSE(dvv::parseSplitLogName("p-2026111a-153126.log", "p", letters).has_value());
+        CHECK_FALSE(
+            dvv::parseSplitLogName("p-20261110-153126-1234567890.log", "p", letters).has_value());
+        CHECK_FALSE(dvv::parseSplitLogName("p-20261110_153126.log", "p", letters).has_value());
+    }
+}
+
+TEST_CASE("SplitLogName orders by stamp, then number") {
+    CHECK(dvv::SplitLogName{20261110153126, 2} > dvv::SplitLogName{20261110153126, 1});
+    CHECK(dvv::SplitLogName{20261110153127, 1} > dvv::SplitLogName{20261110153126, 9});
+    CHECK(dvv::SplitLogName{20261110153126, 1} == dvv::SplitLogName{20261110153126, 1});
 }
 
 TEST_CASE("split sink: non-matching names are ignored") {
@@ -270,7 +310,8 @@ TEST_CASE("split sink: non-matching names are ignored") {
         writeFile(temp.path() / name, name + "\n");
     }
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest).value();
         const auto current = utf8Name(sink->currentFile());
         CHECK(std::ranges::find(foreign, current) == foreign.end());
         CHECK(std::regex_match(current, std::regex(R"(^p-\d{8}-\d{6}\.log$)")));
@@ -283,11 +324,68 @@ TEST_CASE("split sink: non-matching names are ignored") {
     }
 }
 
-TEST_CASE("split sink: open(false) always creates") {
+#if defined(__linux__)
+TEST_CASE("split sink: a file whose name is not UTF-8 is ignored") {
+    const TempDir temp("dvv-base-split-nonutf8");
+    writeFile(temp.path() / "p-20260101-000000.log", "old\n");
+    const std::string odd_name = std::string("p-\xFF") + ".log";
+    writeFile(temp.path() / odd_name, "odd\n");
+    const auto sink =
+        dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest);
+    CHECK(sink.has_value());
+    if (sink) {
+        CHECK((*sink)->currentFile() == temp.path() / "p-20260101-000000.log");
+    }
+    CHECK(readFile(temp.path() / odd_name) == "odd\n");
+}
+
+TEST_CASE("split sink: a prefix that is not UTF-8 appends to its own file") {
+    const TempDir temp("dvv-base-split-nonutf8-prefix");
+    const std::string prefix = "p\xFF";
+    std::filesystem::path first;
+    {
+        const auto sink =
+            dvv::SplitFileSink::open(temp.path(), prefix, 1000, dvv::SplitOpen::AppendNewest);
+        CHECK(sink.has_value());
+        if (sink) {
+            writeLine(**sink, "one");
+            first = (*sink)->currentFile();
+        }
+    }
+    const auto sink =
+        dvv::SplitFileSink::open(temp.path(), prefix, 1000, dvv::SplitOpen::AppendNewest);
+    CHECK(sink.has_value());
+    if (sink) {
+        CHECK((*sink)->currentFile() == first);
+        std::error_code error;
+        const std::uintmax_t size = std::filesystem::file_size(first, error);
+        CHECK(size > 0);
+        CHECK((*sink)->totalBytes() == size);
+    }
+    CHECK(fileNames(temp.path()).size() == 1);
+}
+#endif
+
+TEST_CASE("split sink: the bool open form still appends and creates") {
+    const TempDir temp("dvv-base-split-bool");
+    writeFile(temp.path() / "p-20260102-000000.log", "abcdefghi\n");
+    {
+        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+        CHECK(sink->currentFile() == temp.path() / "p-20260102-000000.log");
+    }
+    {
+        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        CHECK(sink->currentFile() != temp.path() / "p-20260102-000000.log");
+    }
+    CHECK(fileNames(temp.path()).size() == 2);
+}
+
+TEST_CASE("split sink: open(NewFile) always creates") {
     const TempDir temp("dvv-base-split-create");
     writeFile(temp.path() / "p-20260102-000000.log", "abcdefghi\n");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
         CHECK(sink->currentFile() != temp.path() / "p-20260102-000000.log");
         CHECK(sink->splits() == 0);
         writeLine(*sink, "new");
@@ -298,15 +396,17 @@ TEST_CASE("split sink: open(false) always creates") {
 
 TEST_CASE("split sink: open rejects a zero limit or an empty prefix") {
     const TempDir temp("dvv-base-split-bad");
-    CHECK_FALSE(dvv::SplitFileSink::open(temp.path(), "p", 0, true).has_value());
-    CHECK_FALSE(dvv::SplitFileSink::open(temp.path(), "", 100, true).has_value());
+    CHECK_FALSE(
+        dvv::SplitFileSink::open(temp.path(), "p", 0, dvv::SplitOpen::AppendNewest).has_value());
+    CHECK_FALSE(
+        dvv::SplitFileSink::open(temp.path(), "", 100, dvv::SplitOpen::AppendNewest).has_value());
     CHECK(fileNames(temp.path()).empty());
 }
 
 TEST_CASE("split sink: open creates the folder") {
     const TempDir temp("dvv-base-split-folder");
     const auto folder = temp.path() / "a" / "b";
-    auto sink = dvv::SplitFileSink::open(folder, "p", 100, true).value();
+    auto sink = dvv::SplitFileSink::open(folder, "p", 100, dvv::SplitOpen::AppendNewest).value();
     CHECK(fileNames(folder).size() == 1);
 }
 
@@ -315,7 +415,8 @@ TEST_CASE("split sink: splits at the limit without dividing a line") {
     std::vector<std::string> written;
     std::uint64_t splits = 0;
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 100, dvv::SplitOpen::NewFile).value();
         // 30-byte lines: three fit in 100 bytes, a fourth would pass the limit.
         for (int i = 0; i < 10; ++i) {
             written.push_back(lineOf(30, std::format("line {:02} ", i)));
@@ -353,7 +454,8 @@ TEST_CASE("split sink: splits at the limit without dividing a line") {
 TEST_CASE("split sink: never splits an empty file") {
     const TempDir temp("dvv-base-split-empty");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 100, dvv::SplitOpen::NewFile).value();
         writeLine(*sink, lineOf(500, "big "));
         CHECK(sink->splits() == 0);
     }
@@ -363,7 +465,8 @@ TEST_CASE("split sink: never splits an empty file") {
 TEST_CASE("split sink: a file with only its header is not split") {
     const TempDir temp("dvv-base-split-header-only");
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 100, dvv::SplitOpen::NewFile).value();
         sink->setHeader(
             [](const std::filesystem::path& /*previous*/) { return std::string(90, 'h'); });
         writeLine(*sink, lineOf(500, "big "));
@@ -380,7 +483,8 @@ TEST_CASE("split sink: header in each new file, not in an appended one") {
     std::vector<std::filesystem::path> previous;
     std::vector<std::filesystem::path> files;
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 200, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 200, dvv::SplitOpen::AppendNewest).value();
         files.push_back(sink->currentFile());
         sink->setHeader([&previous](const std::filesystem::path& file) {
             previous.push_back(file);
@@ -416,7 +520,8 @@ TEST_CASE("split sink: the header of a created file is written by setHeader, wit
     std::vector<std::filesystem::path> previous;
     std::filesystem::path file;
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest).value();
         file = sink->currentFile();
         sink->setHeader([&previous](const std::filesystem::path& from) {
             previous.push_back(from);
@@ -439,7 +544,8 @@ TEST_CASE("split sink: setHeader after the first line writes no header") {
     std::filesystem::path file;
     int calls = 0;
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
         file = sink->currentFile();
         writeLine(*sink, "first line");
         sink->setHeader([&calls](const std::filesystem::path& /*previous*/) {
@@ -451,6 +557,77 @@ TEST_CASE("split sink: setHeader after the first line writes no header") {
     CHECK(readFile(file) == "first line\n");
 }
 
+namespace {
+std::string firstLine(const std::filesystem::path& file) {
+    const std::string text = readFile(file);
+    return text.substr(0, text.find('\n'));
+}
+}  // namespace
+
+TEST_CASE("split sink: setHeader takes a move-only callable") {
+    const TempDir temp("dvv-base-split-header-move-only");
+    std::filesystem::path file;
+    {
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
+        file = sink->currentFile();
+        auto text = std::make_unique<std::string>("HEADER");
+        sink->setHeader(
+            [text = std::move(text)](const std::filesystem::path& /*previous*/) { return *text; });
+    }
+    CHECK(firstLine(file).find("HEADER") != std::string::npos);
+}
+
+TEST_CASE("split sink: setHeader takes a std::function") {
+    const TempDir temp("dvv-base-split-header-std-function");
+    std::filesystem::path file;
+    {
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
+        file = sink->currentFile();
+        const std::function<std::string(const std::filesystem::path&)> make =
+            [](const std::filesystem::path& /*previous*/) { return std::string("FROMFUNCTION"); };
+        sink->setHeader(make);
+    }
+    CHECK(firstLine(file).find("FROMFUNCTION") != std::string::npos);
+}
+
+TEST_CASE("split sink: setHeader(nullptr) means no header") {
+    const TempDir temp("dvv-base-split-header-nullptr");
+    std::filesystem::path file;
+    {
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
+        file = sink->currentFile();
+        sink->setHeader(nullptr);
+        CHECK(readFile(file).empty());
+        writeLine(*sink, "the line");
+    }
+    CHECK(firstLine(file).find("the line") != std::string::npos);
+}
+
+TEST_CASE("split sink: a null function pointer means no header") {
+    const TempDir temp("dvv-base-split-header-null-pointer");
+    std::filesystem::path file;
+    {
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
+        file = sink->currentFile();
+        std::string (*fn)(const std::filesystem::path&) = nullptr;
+        sink->setHeader(fn);
+        CHECK(readFile(file).empty());
+        writeLine(*sink, "the line");
+    }
+    CHECK(firstLine(file).find("the line") != std::string::npos);
+}
+
+TEST_CASE("split sink: an empty std::function throws at the first header") {
+    const TempDir temp("dvv-base-split-header-empty-function");
+    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
+    CHECK_THROWS_AS(sink->setHeader(std::function<std::string(const std::filesystem::path&)>{}),
+                    std::bad_function_call);
+}
+
 #if !defined(_WIN32)
 TEST_CASE("split sink: a folder that cannot take a file fails the open") {
     if (::geteuid() == 0) {
@@ -459,7 +636,8 @@ TEST_CASE("split sink: a folder that cannot take a file fails the open") {
     const TempDir temp("dvv-base-split-readonly-open");
     std::filesystem::permissions(
         temp.path(), std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
-    CHECK_FALSE(dvv::SplitFileSink::open(temp.path(), "p", 100, false).has_value());
+    CHECK_FALSE(
+        dvv::SplitFileSink::open(temp.path(), "p", 100, dvv::SplitOpen::NewFile).has_value());
 }
 
 TEST_CASE("split sink: back-off after a failed creation") {
@@ -469,7 +647,8 @@ TEST_CASE("split sink: back-off after a failed creation") {
     const TempDir temp("dvv-base-split-backoff");
     {
         // max_bytes 400: back-off 100 bytes, a bit over three 30-byte lines.
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 400, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 400, dvv::SplitOpen::NewFile).value();
         const auto first = sink->currentFile();
         for (int i = 0; i < 13; ++i) {  // 390 bytes
             writeLine(*sink, lineOf(30, std::format("line {:02} ", i)));
@@ -507,7 +686,8 @@ TEST_CASE("split sink: a newest file that cannot be appended to gets a new file"
     writeFile(locked, "locked\n");
     std::filesystem::permissions(locked, std::filesystem::perms::owner_read);
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::AppendNewest).value();
         CHECK(sink->currentFile() != locked);
         writeLine(*sink, "line");
     }
@@ -524,7 +704,8 @@ TEST_CASE("split sink: a failed write closes the file; a new one waits for the b
     std::vector<std::filesystem::path> files;
     {
         // max_bytes 1000: back-off 250 bytes.
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
         files.push_back(sink->currentFile());
         rlimit small = saved;
         small.rlim_cur = 200;
@@ -562,7 +743,8 @@ TEST_CASE("split sink: a failed write after max_bytes / 4 tries a new file at on
     std::filesystem::path second;
     {
         // max_bytes 1000: back-off 250 bytes; the file fails at 400, after the back-off.
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
         first = sink->currentFile();
         rlimit small = saved;
         small.rlim_cur = 400;
@@ -597,7 +779,8 @@ TEST_CASE("split sink: a split whose old file cannot be flushed notes it on stde
     {
         // max_bytes 1000: ten 99-byte Info lines stay in the buffer, then the split flushes them
         // past the 300 byte file size limit.
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 1000, dvv::SplitOpen::NewFile).value();
         const auto first = sink->currentFile();
         rlimit small = saved;
         small.rlim_cur = 300;
@@ -624,7 +807,8 @@ TEST_CASE("split sink: nothing renamed or deleted") {
     writeFile(temp.path() / "p.log.1", "legacy backup\n");
     std::set<std::filesystem::path> files;
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 100, dvv::SplitOpen::AppendNewest).value();
         for (int i = 0; i < 20; ++i) {
             files.insert(sink->currentFile());
             writeLine(*sink, lineOf(30, std::format("line {:02} ", i)));
@@ -648,7 +832,8 @@ TEST_CASE("split sink: totalBytes") {
     writeFile(temp.path() / "p-20260102-000000-2.log", std::string(20, 'b'));
     writeFile(temp.path() / "p-other.log", std::string(1000, 'c'));
     {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100, true).value();
+        auto sink =
+            dvv::SplitFileSink::open(temp.path(), "p", 100, dvv::SplitOpen::AppendNewest).value();
         CHECK(sink->totalBytes() == 30);
         sink->setHeader(
             [](const std::filesystem::path& /*previous*/) { return std::string("HEADER"); });
@@ -659,7 +844,7 @@ TEST_CASE("split sink: totalBytes") {
         CHECK(sink->splits() >= 2);
         std::uintmax_t on_disk = 0;
         for (const auto& name : fileNames(temp.path())) {
-            if (dvv::detail::parseSplitLogName(name, "p").has_value()) {
+            if (dvv::parseSplitLogName(name, "p").has_value()) {
                 on_disk += std::filesystem::file_size(temp.path() / name);
             }
         }
@@ -671,7 +856,7 @@ TEST_CASE("split sink: totalBytes") {
 TEST_CASE("split sink: a mark is flushed at once") {
     const TempDir temp("dvv-base-split-mark");
     LoggerScope scope;
-    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100000, false).value();
+    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100000, dvv::SplitOpen::NewFile).value();
     dvv::Logger::instance().addSink(sink);
     DVV_LOG_INFO("buffered");
     CHECK(readFile(sink->currentFile()).empty());  // Info stays in the stream's buffer
@@ -686,7 +871,7 @@ TEST_CASE("split sink: a mark is flushed at once") {
 TEST_CASE("split sink: a warning is flushed at once") {
     const TempDir temp("dvv-base-split-warn");
     LoggerScope scope;
-    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100000, false).value();
+    auto sink = dvv::SplitFileSink::open(temp.path(), "p", 100000, dvv::SplitOpen::NewFile).value();
     dvv::Logger::instance().addSink(sink);
     DVV_LOG_INFO("buffered");
     DVV_LOG_WARN("urgent");

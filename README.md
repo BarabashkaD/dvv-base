@@ -2,7 +2,8 @@
 
 Foundation library of the dvv stack used by rawreel: errors (`Result`, `DVV_TRY`, `co_try`),
 factory-only creation with a lifetime registry and leak check, coroutine tasks and executors,
-logging, a JSON wrapper, a URI parser and per-user paths. C++23, no dependencies beyond the standard
+logging, a JSON wrapper, a URI parser, per-user paths, UTF-8 and path text
+(`dvv/base/utf8.h`), local time (`dvv/base/local_time.h`). C++23, no dependencies beyond the standard
 library and nlohmann/json.
 
 `dvv::getEnvironment` and `dvv::setEnvironment` take and return UTF-8 names and values; child
@@ -29,7 +30,7 @@ log.stop();
 ### Sinks and levels
 
 A sink implements `ILogSink` (`write`, and optionally `batchEnd` and `flush`). Shipped sinks:
-`StderrSink`, `MemorySink`, `RotatingFileSink`, `SplitFileSink` and `SystemLogSink`.
+`StderrSink`, `MemorySink`, `RotatingFileSink` (deprecated), `SplitFileSink` and `SystemLogSink`.
 `addSink(sink, level)` gives the sink its own minimum level; `setSinkLevel` changes it at any time.
 `setLevel` sets the global minimum. `enabled(level)` is true when a call can reach a sink: the level is not `Off`, is at or
 above `level()` and at or above the lowest sink level. Without sinks the gate is closed and every
@@ -50,17 +51,18 @@ flush a mark at once; `SystemLogSink` writes it at the OS default level (`OS_LOG
 macOS, `LOG_NOTICE` on Linux). In a crash snapshot a mark is flag bit 1 of its record.
 
 `formatLogRecord(record)` gives `2026-10-20T12:34:56.789Z INFO  message [file.cpp:42]`;
-`formatLogRecord(record, false)` leaves out the ` [file.cpp:42]` suffix.
+`formatLogRecord(record, SourceSuffix::Without)` leaves out the ` [file.cpp:42]` suffix.
 
 ### SplitFileSink
 
-`SplitFileSink::open(folder, prefix, max_bytes, append_newest)` writes
+`SplitFileSink::open(folder, prefix, max_bytes, mode)` writes
 `<folder>/<prefix>-YYYYMMDD-HHMMSS[-N].log`, named by the local time of the file's creation; a file
-is created exclusively and a taken name moves on to `-2`, `-3`, .... With `append_newest` the sink
-appends to the newest matching file below `max_bytes` (newest by timestamp, then N), otherwise it
-creates one. A write that would pass `max_bytes` starts a new file first, unless the current file
-holds no line yet, so a line is never divided. It never renames or deletes a file, and a name that
-does not match the pattern is never touched. `setHeader` sets the first line of each new file;
+is created exclusively and a taken name moves on to `-2`, `-3`, .... With `SplitOpen::AppendNewest`
+the sink appends to the newest matching file below `max_bytes` (newest by timestamp, then N),
+otherwise (and with `SplitOpen::NewFile`) it creates one. A write that would pass `max_bytes`
+starts a new file first, unless the current file holds no line yet, so a line is never divided. It
+never renames or deletes a file, and a name that does not match the pattern is never touched.
+`setHeader` sets the first line of each new file;
 `currentFile`, `totalBytes` and `splits` report its state. Warn and above and marks are flushed at
 once; Info and below at `flush()`, `batchEnd()` or destruction. When creating a file or writing
 fails, a note goes to stderr (never to the `Logger`); lines are dropped while no file is open, and a
@@ -146,7 +148,7 @@ dvv-build is cloned next to dvv-base at the version of the `dvv-build` line in `
 
 ```powershell
 git clone https://github.com/BarabashkaD/dvv-base
-git clone --branch v0.4.2 https://github.com/BarabashkaD/dvv-build
+git clone --branch v0.5.0 https://github.com/BarabashkaD/dvv-build
 python -m pip install -r dvv-build/tools/requirements.txt
 cmake -DREPO=dvv-base -P dvv-build/tools/fetch-deps.cmake
 ./dvv-build/bootstrap.ps1

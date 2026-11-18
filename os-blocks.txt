@@ -1,0 +1,5 @@
+# os-blocks baseline, written by dvv-build tools/os-blocks.cmake; it may only shrink
+2	src/environment.cpp
+1	src/log.cpp
+1	src/paths.cpp
+2	src/system_log_sink.cpp

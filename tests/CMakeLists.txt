@@ -11,13 +11,17 @@ add_executable(dvv_base_tests
     test_log.cpp
     test_log_async.cpp
     test_log_encode.cpp
+    test_log_noexcept.cpp
+    test_local_time.cpp
     test_log_ring.cpp
     test_log_snapshot.cpp
     test_paths.cpp
     test_split_file_sink.cpp
     test_task.cpp
     test_uri.cpp
+    test_utf8.cpp
     test_when_all.cpp)
+dvv_os_sources(dvv_base_tests OPTIONAL test_utf8)
 target_link_libraries(dvv_base_tests PRIVATE dvv::base doctest::doctest)
 # The private log ring header is tested directly.
 target_include_directories(dvv_base_tests PRIVATE ${dvv_base_SOURCE_DIR}/src)

@@ -17,6 +17,7 @@ enum class Errc : std::uint8_t {
     Unsupported,
     OutOfMemory,
     DeviceLost,
+    // Deprecated (CHANGELOG 0.5.0): no dvv library returns it.
     ShaderCompile,
     Cancelled,
     Internal,

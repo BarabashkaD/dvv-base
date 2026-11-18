@@ -10,8 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "dvv/base/utf8.h"
 #include "paths_rules.h"
-#include "utf8_path.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -27,16 +27,14 @@ namespace detail {
 
 namespace {
 
-using dvv::detail::pathFromUtf8;
-
 // <base>/<relative>/<app>/<tail>; an empty part adds nothing (no trailing separator). Every part
-// goes through pathFromUtf8, so the app name (UTF-8) and the ASCII literals are joined the same
+// goes through pathFromText, so the app name (UTF-8) and the ASCII literals are joined the same
 // way.
 std::filesystem::path join(std::filesystem::path base, std::string_view relative,
                            std::string_view app, std::string_view tail) {
     for (const std::string_view part : {relative, app, tail}) {
         if (!part.empty()) {
-            base /= pathFromUtf8(part);
+            base /= pathFromText(part);
         }
     }
     return base;
@@ -60,7 +58,7 @@ Result<std::filesystem::path> resolveDir(const DirRule& rule, std::string_view a
             note(std::format("{} is not set", source.variable));
             continue;
         }
-        auto base = pathFromUtf8(*value);
+        auto base = pathFromText(*value);
         if (!base.is_absolute()) {
             note(std::format("{} is not an absolute path", source.variable));
             continue;
@@ -81,8 +79,8 @@ Result<void> checkApp(std::string_view app) {
         app.find_first_of(FORBIDDEN_APP_CHARS) != std::string_view::npos) {
         return makeError(Errc::Internal, "application name must be a plain directory name");
     }
-    // pathFromUtf8 (path from u8string) would throw on Windows for a name that is not valid UTF-8.
-    if (!dvv::detail::isValidUtf8(app)) {
+    // an app name must be valid UTF-8 on every OS.
+    if (!dvv::isValidUtf8(app)) {
         return makeError(Errc::Internal, "application name must be valid UTF-8");
     }
     return {};

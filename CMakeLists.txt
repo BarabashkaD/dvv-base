@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.2)
-project(dvv_base VERSION 0.4.1 DESCRIPTION "dvv base library" LANGUAGES CXX)
+project(dvv_base VERSION 0.5.0 DESCRIPTION "dvv base library" LANGUAGES CXX)
 # Version string; a pre-release build adds its release-stage label (user decision U-M4ORDER).
 set(dvv_base_VERSION_STRING "${PROJECT_VERSION}")
 
@@ -19,6 +19,7 @@ dvv_dependencies()
 # dvv-build through this cache entry, installed through dvv_baseConfig.cmake (copies next to it).
 set(DVV_CMAKE_DIR "${DVV_BUILD_CMAKE_DIR}" CACHE INTERNAL "Shared dvv CMake modules")
 include("${DVV_CMAKE_DIR}/DvvCompilerOptions.cmake")
+include("${DVV_CMAKE_DIR}/DvvOsSources.cmake")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
@@ -40,7 +41,8 @@ add_library(dvv_base STATIC
     src/paths.cpp
     src/split_file_sink.cpp
     src/system_log_sink.cpp
-    src/uri.cpp)
+    src/uri.cpp
+    src/utf8.cpp)
 add_library(dvv::base ALIAS dvv_base)
 set_target_properties(dvv_base PROPERTIES EXPORT_NAME base)
 target_include_directories(dvv_base PUBLIC
@@ -55,6 +57,8 @@ elseif(APPLE)
 else()
     target_sources(dvv_base PRIVATE src/paths_linux.cpp)
 endif()
+dvv_os_sources(dvv_base OPTIONAL src/utf8)
+dvv_os_sources(dvv_base src/local_time)
 dvv_set_compiler_options(dvv_base)
 
 install(TARGETS dvv_base EXPORT dvv_baseTargets)
@@ -69,6 +73,7 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/dvv_baseConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/dvv_baseConfigVersion.cmake
     ${DVV_BUILD_CMAKE_DIR}/DvvCompilerOptions.cmake
+    ${DVV_BUILD_CMAKE_DIR}/DvvOsSources.cmake
     ${DVV_BUILD_CMAKE_DIR}/run-compile-fail.cmake
     DESTINATION ${config_dir})
 
