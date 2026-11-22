@@ -196,7 +196,7 @@ static_assert(LOG_SNAPSHOT_RECORD_HEADER_BYTES <= sizeof(LogRecordHeader));
 // The standard line of formatLogRecord from its parts, appended to `out`.
 void appendStandardLine(std::chrono::sys_time<std::chrono::milliseconds> time, LogLevel level,
                         std::string_view message, std::string_view file, std::uint_least32_t line,
-                        std::string& out, bool with_source = true);
+                        std::string& out, SourceSuffix suffix = SourceSuffix::With);
 // The text of the warning about a call site that formats only "{}".
 [[nodiscard]] std::string bareWarningText(std::string_view file, std::uint_least32_t line);
 // The log thread's "N log messages dropped (E error, ...)" text from the counts Trace to Error.

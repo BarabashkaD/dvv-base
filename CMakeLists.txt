@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.2)
-project(dvv_base VERSION 0.5.0 DESCRIPTION "dvv base library" LANGUAGES CXX)
+project(dvv_base VERSION 0.6.0 DESCRIPTION "dvv base library" LANGUAGES CXX)
 # Version string; a pre-release build adds its release-stage label (user decision U-M4ORDER).
 set(dvv_base_VERSION_STRING "${PROJECT_VERSION}")
 
@@ -50,13 +50,7 @@ target_include_directories(dvv_base PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dvv_base PUBLIC Threads::Threads nlohmann_json::nlohmann_json)
 # The per-user directory rules of the target OS (src/paths_rules.h).
-if(WIN32)
-    target_sources(dvv_base PRIVATE src/paths_win32.cpp)
-elseif(APPLE)
-    target_sources(dvv_base PRIVATE src/paths_macos.cpp)
-else()
-    target_sources(dvv_base PRIVATE src/paths_linux.cpp)
-endif()
+dvv_os_sources(dvv_base src/paths)
 dvv_os_sources(dvv_base OPTIONAL src/utf8)
 dvv_os_sources(dvv_base src/local_time)
 dvv_set_compiler_options(dvv_base)
@@ -68,7 +62,7 @@ install(EXPORT dvv_baseTargets NAMESPACE dvv:: DESTINATION ${config_dir})
 configure_package_config_file(cmake/dvv_baseConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/dvv_baseConfig.cmake INSTALL_DESTINATION ${config_dir})
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/dvv_baseConfigVersion.cmake
-    COMPATIBILITY SameMajorVersion)
+    COMPATIBILITY SameMinorVersion)
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/dvv_baseConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/dvv_baseConfigVersion.cmake

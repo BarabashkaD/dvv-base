@@ -20,7 +20,7 @@ public:
 }  // namespace
 
 int main() {
-    auto widget = dvv::test::TestAuthority::makeUnique<Widget>();
+    auto widget = dvv::test::TestAuthority::makeShared<Widget>();
 #if DVV_COMPILE_FAIL_CASE == 1
     dvv::CreationKey<dvv::test::TestAuthority> forged(
         dvv::LifetimeRegistry::instance().issue<Widget>());

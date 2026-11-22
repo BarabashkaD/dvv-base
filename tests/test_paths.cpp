@@ -330,3 +330,40 @@ TEST_CASE("ensureDirectory creates nested directories") {
     CHECK(std::filesystem::is_directory(dir));
     std::filesystem::remove_all(dir.parent_path().parent_path());
 }
+
+TEST_CASE("baseNameOf: the text after the last '/' or '\\'") {
+    static_assert(dvv::baseNameOf("a/b/c.yuv") == "c.yuv");
+    static_assert(dvv::baseNameOf("a\\b.yuv") == "b.yuv");
+    static_assert(dvv::baseNameOf("X:\\clips/x.yuv") == "x.yuv");
+    static_assert(dvv::baseNameOf("file:///X:/a/b.yuv") == "b.yuv");
+    static_assert(dvv::baseNameOf("c.yuv") == "c.yuv");
+    static_assert(dvv::baseNameOf("a/").empty());
+    static_assert(dvv::baseNameOf("/").empty());
+    static_assert(dvv::baseNameOf("").empty());
+    CHECK(dvv::baseNameOf("a/b/c.yuv") == "c.yuv");
+    CHECK(dvv::baseNameOf("a\\b.yuv") == "b.yuv");
+    CHECK(dvv::baseNameOf("X:\\clips/x.yuv") == "x.yuv");
+    CHECK(dvv::baseNameOf("file:///X:/a/b.yuv") == "b.yuv");
+    CHECK(dvv::baseNameOf("c.yuv") == "c.yuv");
+    CHECK(dvv::baseNameOf("a/").empty());
+    CHECK(dvv::baseNameOf("/").empty());
+    CHECK(dvv::baseNameOf("").empty());
+    CHECK(dvv::baseNameOf("C:") == "C:");
+    CHECK(dvv::baseNameOf("dir\\").empty());
+    constexpr std::string_view TEXT = "a/b/c.yuv";
+    CHECK(dvv::baseNameOf(TEXT).data() == TEXT.data() + 4);
+}
+
+TEST_CASE("isDriveLetterPath: an ASCII letter, then ':'") {
+    for (const std::string_view text : {"C:", "c:", "x:\\a", "x:/a", "Z:rel"}) {
+        INFO(text);
+        CHECK(dvv::isDriveLetterPath(text));
+    }
+    for (const std::string_view text :
+         {"", "C", ":", "1:", "CC:", "/C:", "@:", "[:", "`:", "{:", "\xC3:"}) {
+        INFO(text);
+        CHECK_FALSE(dvv::isDriveLetterPath(text));
+    }
+    static_assert(dvv::isDriveLetterPath("C:"));
+    static_assert(!dvv::isDriveLetterPath("1:"));
+}

@@ -12,11 +12,6 @@ namespace dvv::test {
 class TestAuthority {
 public:
     template <ManagedType T, class... Args>
-    [[nodiscard]] static std::unique_ptr<T> makeUnique(Args&&... args) {
-        return std::make_unique<T>(key<T>(), std::forward<Args>(args)...);
-    }
-
-    template <ManagedType T, class... Args>
     [[nodiscard]] static std::shared_ptr<T> makeShared(Args&&... args) {
         return std::make_shared<T>(key<T>(), std::forward<Args>(args)...);
     }

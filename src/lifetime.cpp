@@ -74,7 +74,6 @@ LifetimeToken LifetimeRegistry::makeToken(TypeRecord& type, ObjectId owner,
     token.owner_ = owner;
     if (detailed()) {
         token.where_ = where;
-        token.time_ = std::chrono::system_clock::now();
     }
     return token;
 }
@@ -116,8 +115,8 @@ std::vector<LiveObjectInfo> LifetimeRegistry::liveObjects() const {
     for (const Shard& shard : shards_) {
         std::lock_guard lock(shard.mutex);
         for (const ManagedObject* object = shard.head; object != nullptr; object = object->next_) {
-            objects.push_back(LiveObjectInfo{object->type_->name, object->id_, object->owner_,
-                                             object->where_, object->time_});
+            objects.push_back(
+                LiveObjectInfo{object->type_->name, object->id_, object->owner_, object->where_});
         }
     }
     return objects;
@@ -135,11 +134,7 @@ std::vector<TypeStats> LifetimeRegistry::typeStats() const {
 }
 
 ManagedObject::ManagedObject(LifetimeToken&& token) noexcept
-    : type_(token.type_),
-      id_(token.id_),
-      owner_(token.owner_),
-      where_(token.where_),
-      time_(token.time_) {
+    : type_(token.type_), id_(token.id_), owner_(token.owner_), where_(token.where_) {
     assert(type_ != nullptr && "a LifetimeToken may be used only once");
     token.type_ = nullptr;
     LifetimeRegistry::instance().link(*this);

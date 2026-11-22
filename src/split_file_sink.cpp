@@ -8,6 +8,7 @@
 #include <system_error>
 #include <utility>
 
+#include "dvv/base/ascii.h"
 #include "dvv/base/local_time.h"
 #include "dvv/base/log.h"
 #include "dvv/base/utf8.h"
@@ -34,10 +35,6 @@ std::uint64_t digitsValue(std::string_view text) noexcept {
     return value;
 }
 
-char asciiLower(char c) noexcept {
-    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
-}
-
 // text[pos, pos + count), unchecked; substr would be a throwing path in a noexcept parser.
 std::string_view slice(std::string_view text, std::size_t pos, std::size_t count) noexcept {
     return {text.data() + pos, count};
@@ -47,7 +44,7 @@ bool sameText(std::string_view a, std::string_view b, LetterCase letters) noexce
     if (letters == LetterCase::Exact) {
         return a == b;
     }
-    return std::ranges::equal(a, b, [](char x, char y) { return asciiLower(x) == asciiLower(y); });
+    return equalsIgnoreAscii(a, b);
 }
 
 }  // namespace
@@ -214,14 +211,6 @@ Result<std::shared_ptr<SplitFileSink>> SplitFileSink::open(std::filesystem::path
     sink->current_ = std::move(created->path);
     sink->header_pending_ = true;
     return sink;
-}
-
-Result<std::shared_ptr<SplitFileSink>> SplitFileSink::open(std::filesystem::path folder,
-                                                           std::string prefix,
-                                                           std::uintmax_t max_bytes,
-                                                           bool append_newest) {
-    return open(std::move(folder), std::move(prefix), max_bytes,
-                append_newest ? SplitOpen::AppendNewest : SplitOpen::NewFile);
 }
 
 SplitFileSink::SplitFileSink(std::filesystem::path folder, std::string prefix,

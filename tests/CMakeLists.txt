@@ -2,6 +2,7 @@ find_package(doctest 2.5 REQUIRED CONFIG)
 
 add_executable(dvv_base_tests
     main.cpp
+    test_ascii.cpp
     test_environment.cpp
     test_error.cpp
     test_executors.cpp

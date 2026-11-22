@@ -58,7 +58,7 @@ static_assert(!std::is_move_constructible_v<Widget>);
 TEST_CASE("managed objects are registered while alive") {
     auto& registry = dvv::LifetimeRegistry::instance();
     const std::size_t before = registry.liveCount();
-    auto widget = dvv::test::TestAuthority::makeUnique<Widget>(7);
+    auto widget = dvv::test::TestAuthority::makeShared<Widget>(7);
     CHECK(widget->value() == 7);
     CHECK(widget->objectId() != dvv::NO_OWNER);
     CHECK(widget->typeName().find("Widget") != std::string_view::npos);
@@ -83,9 +83,9 @@ TEST_CASE("detailed mode records the creation location") {
     auto& registry = dvv::LifetimeRegistry::instance();
     const bool previous = registry.detailed();
     registry.setDetailed(false);
-    auto plain = dvv::test::TestAuthority::makeUnique<Widget>(1);
+    auto plain = dvv::test::TestAuthority::makeShared<Widget>(1);
     registry.setDetailed(true);
-    auto detailed = dvv::test::TestAuthority::makeUnique<Widget>(2);
+    auto detailed = dvv::test::TestAuthority::makeShared<Widget>(2);
     int found = 0;
     for (const auto& info : registry.liveObjects()) {
         if (info.id == plain->objectId()) {
@@ -95,7 +95,6 @@ TEST_CASE("detailed mode records the creation location") {
         if (info.id == detailed->objectId()) {
             ++found;
             CHECK(info.createdAt.has_value());
-            CHECK(info.createdTime.has_value());
         }
     }
     registry.setDetailed(previous);
@@ -119,10 +118,10 @@ TEST_CASE("concurrent creation and destruction keeps the count consistent") {
     threads.reserve(8);
     for (int t = 0; t < 8; ++t) {
         threads.emplace_back([] {
-            std::vector<std::unique_ptr<Widget>> widgets;
+            std::vector<std::shared_ptr<Widget>> widgets;
             widgets.reserve(500);
             for (int i = 0; i < 500; ++i) {
-                widgets.push_back(dvv::test::TestAuthority::makeUnique<Widget>(i));
+                widgets.push_back(dvv::test::TestAuthority::makeShared<Widget>(i));
             }
         });
     }
@@ -132,7 +131,7 @@ TEST_CASE("concurrent creation and destruction keeps the count consistent") {
 
 TEST_CASE("leak check reports live objects and applies the policy") {
     CHECK(dvv::finishWithLeakCheck(0, dvv::LeakPolicy::Fail) == 0);
-    auto widget = dvv::test::TestAuthority::makeUnique<Widget>(3);
+    auto widget = dvv::test::TestAuthority::makeShared<Widget>(3);
     CHECK(dvv::finishWithLeakCheck(0, dvv::LeakPolicy::Fail) == 1);
     CHECK(dvv::finishWithLeakCheck(5, dvv::LeakPolicy::Fail) == 5);
     CHECK(dvv::finishWithLeakCheck(0, dvv::LeakPolicy::Warn) == 0);

@@ -17,8 +17,6 @@ enum class Errc : std::uint8_t {
     Unsupported,
     OutOfMemory,
     DeviceLost,
-    // Deprecated (CHANGELOG 0.5.0): no dvv library returns it.
-    ShaderCompile,
     Cancelled,
     Internal,
 };
@@ -51,6 +49,11 @@ using Result = std::expected<T, Error>;
 
 [[nodiscard]] std::unexpected<Error> makeError(
     Errc code, std::string message, std::source_location where = std::source_location::current());
+
+// The text of the exception being handled, for an error message: Error::describe() for a
+// std::bad_expected_access<Error> (a failed Result<T>::value()), what() for another
+// std::exception, "unknown exception" for anything else, "no exception" outside a handler.
+[[nodiscard]] std::string describeCurrentException();
 
 }  // namespace dvv
 
