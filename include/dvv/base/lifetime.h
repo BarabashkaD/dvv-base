@@ -9,7 +9,6 @@
 #include <array>
 #include <atomic>
 #include <cassert>
-#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -46,8 +45,7 @@ struct LiveObjectInfo {
     std::string_view type;
     ObjectId id = 0;
     ObjectId owner = NO_OWNER;
-    std::optional<std::source_location> createdAt;                     // detailed mode only
-    std::optional<std::chrono::system_clock::time_point> createdTime;  // detailed mode only
+    std::optional<std::source_location> createdAt;  // detailed mode only
 };
 
 class LifetimeRegistry;
@@ -81,14 +79,12 @@ private:
         id_ = other.id_;
         owner_ = other.owner_;
         where_ = other.where_;
-        time_ = other.time_;
     }
 
     TypeRecord* type_ = nullptr;
     ObjectId id_ = 0;
     ObjectId owner_ = NO_OWNER;
     std::optional<std::source_location> where_;
-    std::optional<std::chrono::system_clock::time_point> time_;
 };
 
 // Passkey and lifetime token in one. Only the authority F can create it.
@@ -211,7 +207,6 @@ private:
     ObjectId id_;
     ObjectId owner_;
     std::optional<std::source_location> where_;
-    std::optional<std::chrono::system_clock::time_point> time_;
     ManagedObject* prev_ = nullptr;
     ManagedObject* next_ = nullptr;
 };

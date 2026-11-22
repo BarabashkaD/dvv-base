@@ -2,9 +2,38 @@
 
 All notable changes to dvv-base. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow semantic versioning with
-the dvv rules: compatible = the same major and at least the minimum version, also for 0.x; breaking
-changes only in a new major, after a deprecation. This file is the release notes (there are no
-GitHub Releases).
+the dvv rules: compatible = the same 0.minor and at least the minimum version; a replaced or unused
+API is removed in the next 0.x minor, with no deprecation period. This file is the release notes
+(there are no GitHub Releases).
+
+## [0.6.0] - 2026-11-22
+
+The deprecated forms are gone; one owner for the exception text, ASCII case folding, the base
+name of a path and the drive-letter test; requires dvv-build 0.6.0.
+
+### Added
+- `describeCurrentException()` (`dvv/base/error.h`): the text of the exception being handled.
+- `dvv/base/ascii.h`: `isAsciiLetter`, `asciiLower`, `asciiUpper` and `equalsIgnoreAscii`,
+  independent of the C locale.
+- `baseNameOf` and `isDriveLetterPath` (`dvv/base/paths.h`): the text after the last '/' or '\'
+  of a path, and the test for a leading drive letter ("X:"), the same on every OS.
+
+### Changed
+- `formatLogRecord(record, SourceSuffix suffix = SourceSuffix::With)` is one function; every call
+  compiles as before.
+- `Errc::Cancelled` and `Errc::Internal` have new numeric values (5 and 6); rebuild everything that
+  uses dvv-base.
+- The package version file uses `SameMinorVersion`: `find_package(dvv_base 0.6)` accepts 0.6.x
+  only.
+- Requires dvv-build 0.6.0.
+
+### Removed
+- `formatLogRecord(record, bool)`: use `SourceSuffix`.
+- `SplitFileSink::open(…, bool append_newest)`: use `SplitOpen`.
+- `RotatingFileSink`: use `SplitFileSink`.
+- `Errc::ShaderCompile`: no dvv library returned it.
+- `ThreadPool::threadCount()`, `LiveObjectInfo::createdTime` and `TestAuthority::makeUnique`
+  (use `TestAuthority::makeShared`).
 
 ## [0.5.0] - 2026-11-19
 

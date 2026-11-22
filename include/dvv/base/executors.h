@@ -31,7 +31,6 @@ public:
     ~ThreadPool() override;
 
     void post(MoveOnlyFunction<void()> work) override;
-    [[nodiscard]] std::size_t threadCount() const noexcept { return threads_.size(); }
 
 private:
     struct State;

@@ -295,6 +295,16 @@ TEST_CASE("parseSplitLogName ignores ASCII case when asked") {
     }
 }
 
+TEST_CASE("parseSplitLogName ignores only ASCII case") {
+    using dvv::LetterCase;
+    CHECK(dvv::parseSplitLogName("GR\xC3\xBCN-20261110-153126.log", "gr\xC3\xBCn",
+                                 LetterCase::IgnoreAscii)
+              .has_value());
+    CHECK_FALSE(dvv::parseSplitLogName("\xC3\x84rger-20261110-153126.log", "\xC3\xA4rger",
+                                       LetterCase::IgnoreAscii)
+                    .has_value());
+}
+
 TEST_CASE("SplitLogName orders by stamp, then number") {
     CHECK(dvv::SplitLogName{20261110153126, 2} > dvv::SplitLogName{20261110153126, 1});
     CHECK(dvv::SplitLogName{20261110153127, 1} > dvv::SplitLogName{20261110153126, 9});
@@ -365,20 +375,6 @@ TEST_CASE("split sink: a prefix that is not UTF-8 appends to its own file") {
     CHECK(fileNames(temp.path()).size() == 1);
 }
 #endif
-
-TEST_CASE("split sink: the bool open form still appends and creates") {
-    const TempDir temp("dvv-base-split-bool");
-    writeFile(temp.path() / "p-20260102-000000.log", "abcdefghi\n");
-    {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, true).value();
-        CHECK(sink->currentFile() == temp.path() / "p-20260102-000000.log");
-    }
-    {
-        auto sink = dvv::SplitFileSink::open(temp.path(), "p", 1000, false).value();
-        CHECK(sink->currentFile() != temp.path() / "p-20260102-000000.log");
-    }
-    CHECK(fileNames(temp.path()).size() == 2);
-}
 
 TEST_CASE("split sink: open(NewFile) always creates") {
     const TempDir temp("dvv-base-split-create");

@@ -102,13 +102,39 @@ dvv::Task<void> hopOnto(dvv::IExecutor& executor, std::atomic<int>& resumed, boo
     }
 }
 
+// Posts `count` items that each count down `meet` and wait for it to reach zero, at most 10 s;
+// an item that saw zero adds 1 to `met`. Every item counts down `returned` as it returns.
+void postMeetingItems(dvv::IExecutor& executor, std::latch& meet, std::latch& returned,
+                      std::atomic<unsigned>& met, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+        executor.post([&] {
+            meet.count_down();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            bool reached = meet.try_wait();
+            while (!reached && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                reached = meet.try_wait();
+            }
+            if (reached) {
+                met.fetch_add(1);
+            }
+            returned.count_down();
+        });
+    }
+}
+
 }  // namespace
 
-TEST_CASE("thread pool runs every posted item") {
-    auto pool = dvv::ExecutorFactory::makeThreadPool(4).value();
-    CHECK(pool->threadCount() == 4);
+TEST_CASE("thread pool runs four items at once") {
     std::atomic<int> count{0};
     std::latch done(100);
+    std::latch meet(4);
+    std::atomic<unsigned> met{0};
+    std::latch returned(4);
+    auto pool = dvv::ExecutorFactory::makeThreadPool(4).value();
+    postMeetingItems(*pool, meet, returned, met, 4);
+    returned.wait();
+    CHECK(met.load() == 4);
     for (int i = 0; i < 100; ++i) {
         pool->post([&] {
             count.fetch_add(1);
@@ -119,9 +145,15 @@ TEST_CASE("thread pool runs every posted item") {
     CHECK(count.load() == 100);
 }
 
-TEST_CASE("thread pool with zero threads uses the hardware concurrency") {
+TEST_CASE("thread pool with zero threads runs hardware-concurrency items at once") {
+    const unsigned count = std::max(1U, std::thread::hardware_concurrency());
+    std::latch meet(count);
+    std::atomic<unsigned> met{0};
+    std::latch returned(count);
     auto pool = dvv::ExecutorFactory::makeThreadPool(0).value();
-    CHECK(pool->threadCount() >= 1);
+    postMeetingItems(*pool, meet, returned, met, count);
+    returned.wait();
+    CHECK(met.load() == count);
 }
 
 TEST_CASE("destroying a thread pool finishes the queued work") {

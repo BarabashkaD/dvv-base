@@ -2,9 +2,11 @@
 
 Foundation library of the dvv stack used by rawreel: errors (`Result`, `DVV_TRY`, `co_try`),
 factory-only creation with a lifetime registry and leak check, coroutine tasks and executors,
-logging, a JSON wrapper, a URI parser, per-user paths, UTF-8 and path text
-(`dvv/base/utf8.h`), local time (`dvv/base/local_time.h`). C++23, no dependencies beyond the standard
-library and nlohmann/json.
+logging, a JSON wrapper, a URI parser, per-user paths, base names and drive letters
+(`dvv/base/paths.h`), UTF-8 and path text (`dvv/base/utf8.h`), ASCII letter tests, lower- and
+upper-casing and case folding (`isAsciiLetter`, `asciiLower`, `asciiUpper`, `equalsIgnoreAscii` in
+`dvv/base/ascii.h`), local time (`dvv/base/local_time.h`). C++23, no dependencies beyond the
+standard library and nlohmann/json.
 
 `dvv::getEnvironment` and `dvv::setEnvironment` take and return UTF-8 names and values; child
 processes see the values they set. Invalid UTF-8, empty names and names with `=` are rejected.
@@ -30,7 +32,7 @@ log.stop();
 ### Sinks and levels
 
 A sink implements `ILogSink` (`write`, and optionally `batchEnd` and `flush`). Shipped sinks:
-`StderrSink`, `MemorySink`, `RotatingFileSink` (deprecated), `SplitFileSink` and `SystemLogSink`.
+`StderrSink`, `MemorySink`, `SplitFileSink` and `SystemLogSink`.
 `addSink(sink, level)` gives the sink its own minimum level; `setSinkLevel` changes it at any time.
 `setLevel` sets the global minimum. `enabled(level)` is true when a call can reach a sink: the level is not `Off`, is at or
 above `level()` and at or above the lowest sink level. Without sinks the gate is closed and every
@@ -46,8 +48,8 @@ call is a single atomic load.
 to every sink whose level is not `Off`, whatever `level()` and the sinks' levels are, and does
 nothing without sinks. Synchronous: in order with the other records, under the logger's lock.
 Asynchronous: through the queue with the priority of Warn, so a full ring drops it only when it
-would drop a warning (counted as a dropped Info message). `RotatingFileSink` and `SplitFileSink`
-flush a mark at once; `SystemLogSink` writes it at the OS default level (`OS_LOG_TYPE_DEFAULT` on
+would drop a warning (counted as a dropped Info message). `SplitFileSink` flushes a mark at
+once; `SystemLogSink` writes it at the OS default level (`OS_LOG_TYPE_DEFAULT` on
 macOS, `LOG_NOTICE` on Linux). In a crash snapshot a mark is flag bit 1 of its record.
 
 `formatLogRecord(record)` gives `2026-10-20T12:34:56.789Z INFO  message [file.cpp:42]`;
@@ -148,7 +150,7 @@ dvv-build is cloned next to dvv-base at the version of the `dvv-build` line in `
 
 ```powershell
 git clone https://github.com/BarabashkaD/dvv-base
-git clone --branch v0.5.0 https://github.com/BarabashkaD/dvv-build
+git clone --branch v0.6.0 https://github.com/BarabashkaD/dvv-build
 python -m pip install -r dvv-build/tools/requirements.txt
 cmake -DREPO=dvv-base -P dvv-build/tools/fetch-deps.cmake
 ./dvv-build/bootstrap.ps1

@@ -9,33 +9,16 @@
 #include <utility>
 #include <vector>
 
+#include "dvv/base/ascii.h"
+#include "dvv/base/paths.h"
+
 namespace dvv {
 
 namespace {
 
 // ASCII-only character classes: independent of the C locale.
-bool isAlpha(char c) noexcept {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
 bool isAlnum(char c) noexcept {
-    return isAlpha(c) || (c >= '0' && c <= '9');
-}
-
-char toLower(char c) noexcept {
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-}
-
-bool equalsIgnoreCase(std::string_view text, std::string_view lower) noexcept {
-    if (text.size() != lower.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        if (toLower(text[i]) != lower[i]) {
-            return false;
-        }
-    }
-    return true;
+    return isAsciiLetter(c) || (c >= '0' && c <= '9');
 }
 
 bool isHierarchical(std::string_view scheme) noexcept {
@@ -44,8 +27,7 @@ bool isHierarchical(std::string_view scheme) noexcept {
 
 // "X:" followed by a separator or the end: a Windows drive, not a scheme.
 bool startsWithDrive(std::string_view text) noexcept {
-    return text.size() >= 2 && isAlpha(text[0]) && text[1] == ':' &&
-           (text.size() == 2 || text[2] == '\\' || text[2] == '/');
+    return isDriveLetterPath(text) && (text.size() == 2 || text[2] == '\\' || text[2] == '/');
 }
 
 // "/X:" followed by a separator or the end: a drive behind a URI path slash.
@@ -59,7 +41,7 @@ std::optional<std::string> schemeOf(std::string_view text) {
         return std::nullopt;
     }
     const std::string_view candidate = text.substr(0, colon);
-    if (!isAlpha(candidate[0])) {
+    if (!isAsciiLetter(candidate[0])) {
         return std::nullopt;
     }
     std::string scheme;
@@ -68,7 +50,7 @@ std::optional<std::string> schemeOf(std::string_view text) {
         if (!isAlnum(c) && c != '+' && c != '-' && c != '.') {
             return std::nullopt;
         }
-        scheme += toLower(c);
+        scheme += asciiLower(c);
     }
     return scheme;
 }
@@ -212,7 +194,7 @@ Result<Uri> parseUri(std::string_view text) {
         path.remove_prefix(2);
         const auto slash = path.find('/');
         const std::string_view authority = path.substr(0, slash);
-        if (!authority.empty() && !equalsIgnoreCase(authority, "localhost")) {
+        if (!authority.empty() && !equalsIgnoreAscii(authority, "localhost")) {
             return makeError(Errc::Unsupported,
                              std::format("URI authority '{}' is not supported", authority));
         }

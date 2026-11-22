@@ -1,6 +1,9 @@
 #include "dvv/base/error.h"
 
+#include <exception>
 #include <format>
+
+#include "dvv/base/paths.h"
 
 namespace dvv {
 
@@ -11,7 +14,6 @@ std::string_view errcName(Errc code) noexcept {
         case Errc::Unsupported: return "Unsupported";
         case Errc::OutOfMemory: return "OutOfMemory";
         case Errc::DeviceLost: return "DeviceLost";
-        case Errc::ShaderCompile: return "ShaderCompile";
         case Errc::Cancelled: return "Cancelled";
         case Errc::Internal: return "Internal";
     }
@@ -19,9 +21,7 @@ std::string_view errcName(Errc code) noexcept {
 }
 
 std::string_view sourceFileName(const std::source_location& where) noexcept {
-    std::string_view path = where.file_name();
-    const auto slash = path.find_last_of("/\\");
-    return slash == std::string_view::npos ? path : path.substr(slash + 1);
+    return baseNameOf(where.file_name());
 }
 
 Error Error::wrap(Errc outer_code, std::string outer_message,
@@ -42,6 +42,22 @@ std::string Error::describe() const {
 
 std::unexpected<Error> makeError(Errc code, std::string message, std::source_location where) {
     return std::unexpected(Error{code, std::move(message), where, nullptr});
+}
+
+std::string describeCurrentException() {
+    const std::exception_ptr current = std::current_exception();
+    if (current == nullptr) {
+        return "no exception";
+    }
+    try {
+        std::rethrow_exception(current);
+    } catch (const std::bad_expected_access<Error>& error) {
+        return error.error().describe();
+    } catch (const std::exception& error) {
+        return error.what();
+    } catch (...) {
+        return "unknown exception";
+    }
 }
 
 }  // namespace dvv

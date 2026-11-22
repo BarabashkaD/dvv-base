@@ -291,3 +291,9 @@ TEST_CASE("every byte 1..255 survives an encode and decode round trip") {
         CHECK(dvv::percentDecode(dvv::percentEncode(text, "")).value() == text);
     }
 }
+
+TEST_CASE("file: URIs keep a drive at the end and a colon without a separator") {
+    CHECK(dvv::parseUri("file:///c:").value().path == "c:");
+    CHECK(dvv::parseUri("file:///c:x").value().path == "/c:x");
+    CHECK(dvv::parseUri("file:///1:/a").value().path == "/1:/a");
+}
